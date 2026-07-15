@@ -74,5 +74,7 @@ target_link_libraries(net_host PRIVATE zaga_core)
 
 add_executable(zaga_installer src/installer/Installer.cpp)
 target_link_libraries(zaga_installer PRIVATE zaga_core ole32 shell32)
+# Run in the caller's console (asInvoker) so output is visible. Admin-only steps
+# print a clear message when not elevated instead of flashing a separate window.
 set_target_properties(zaga_installer PROPERTIES
-    LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\"")
+    LINK_FLAGS "/MANIFESTUAC:\"level='asInvoker' uiAccess='false'\"")

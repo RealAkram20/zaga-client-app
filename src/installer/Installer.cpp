@@ -121,6 +121,27 @@ std::string narrow(const std::wstring& text) {
     return narrowed;
 }
 
+bool isElevated() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return false;
+    }
+    TOKEN_ELEVATION elevation{};
+    DWORD size = sizeof(elevation);
+    bool ok = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size);
+    CloseHandle(token);
+    return ok && elevation.TokenIsElevated != 0;
+}
+
+bool requireAdmin() {
+    if (isElevated()) {
+        return true;
+    }
+    std::printf("This command needs an administrator Command Prompt.\n"
+                "Right-click Command Prompt, choose \"Run as administrator\", then run it again.\n");
+    return false;
+}
+
 std::string argValue(int argc, wchar_t** argv, const wchar_t* name) {
     for (int i = 2; i + 1 < argc; ++i) {
         if (_wcsicmp(argv[i], name) == 0) {
@@ -348,6 +369,15 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     std::wstring command = argv[1];
+
+    bool writesMachineState =
+        command == L"install" || command == L"uninstall" || command == L"provision" ||
+        command == L"enroll" || command == L"fetch-token" || command == L"enable" ||
+        command == L"disable" || command == L"protect" || command == L"unprotect" ||
+        command == L"schedule" || command == L"unschedule" || command == L"set-url";
+    if (writesMachineState && !requireAdmin()) {
+        return 1;
+    }
 
     if (command == L"install") {
         return doInstall();
