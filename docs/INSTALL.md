@@ -1,85 +1,116 @@
 # Install & Test — Credential Provider
 
-How to register, provision, and test the Zaga credential provider. **Do the live
-logon test in a throwaway VM with a snapshot**, not on your working machine — a
-credential provider that misbehaves can block sign-in.
+How to install, provision, arm, and test the Zaga client on a device. **Do the
+live logon test in a throwaway VM with a snapshot**, not on your working machine —
+a credential provider that misbehaves can block sign-in.
 
-## What gets installed
+## What ships
 
-`zaga_lock_provider.dll` is a COM in-process server that registers as both a
-credential provider and a credential provider filter under one class id
-(`{B7A9E3C2-4D1F-4A88-9C2E-6F3B1D0A5E77}`). When the device is locked it shows the
-unlock tile and hides every other logon option; when the device is active it
-shows nothing and normal sign-in proceeds.
+- `zaga_lock_provider.dll` — the credential provider and filter (one COM class id,
+  `{B7A9E3C2-4D1F-4A88-9C2E-6F3B1D0A5E77}`).
+- `zaga_installer.exe` — installs, provisions, arms, and removes the client. It
+  requests administrator rights, so double-clicking prompts for elevation.
 
-## 1. Register
+Keep the two files together; the installer copies the DLL from its own folder.
 
-From an **elevated** command prompt, in the folder holding the built DLL:
+## Off by default
 
-```
-regsvr32 zaga_lock_provider.dll
-```
+A fresh install is **dormant**: the lock is disabled and removal is not protected.
+Installing changes nothing at the login screen. The client only gates login after
+you provision a device **and** run `enable`. This is deliberate, so an install can
+never lock out a test machine on its own.
 
-`regsvr32` calls `DllRegisterServer`, which writes:
+## 1. Install
 
-- `HKCR\CLSID\{clsid}` and `…\InprocServer32` → the DLL path, `ThreadingModel = Apartment`
-- `HKLM\…\Authentication\Credential Providers\{clsid}`
-- `HKLM\…\Authentication\Credential Provider Filters\{clsid}`
-
-To remove it:
+From an elevated command prompt, in the folder holding both files:
 
 ```
-regsvr32 /u zaga_lock_provider.dll
+zaga_installer install
 ```
+
+This copies the DLL to `C:\Program Files\Zaga`, registers it (both as a provider
+and a filter), and leaves the lock disabled.
 
 ## 2. Provision the device
 
-The provider reads its state from the machine store at
-`C:\ProgramData\Zaga\state.bin` (see `FUNCTIONALITY.md`). Until the provisioning
-tool exists (a later milestone), seed a store for testing with the same
-`LocalStore` format the app uses. For development you can point the provider at a
-different store file with the `ZAGA_STATE_PATH` environment variable — this is the
-hook the `provider_host` test uses.
+Write the device's provisioning bundle (account number and HMAC secret) into the
+machine store:
 
-If no store is present, the provider fails closed: it treats the device as locked
-and shows the tile with "Not provisioned".
+```
+zaga_installer provision --account ZG-40000 --secret <64-hex-secret> ^
+    --serial 5CG9482Q1B --model "Dell Latitude 5490" --name "Reception PC"
+```
 
-## 3. Test without signing out (fast loop)
+Retrieve the bundle from the portal device page (super-admin, audit-logged).
+Fetching it directly from the portal over the network is a planned enhancement;
+until then the bundle is passed in here.
 
-`provider_host.exe` loads the real DLL, drives the provider, filter, and
-credential through a full unlock, and verifies the state persists — all without
-LogonUI:
+## 3. Arm the lock
+
+```
+zaga_installer enable
+```
+
+From now on, when the provisioned device is overdue, the tile gates login. Check
+state at any time:
+
+```
+zaga_installer status
+```
+
+## 4. Protect against removal (optional)
+
+By default the client can be uninstalled freely. To require the device's uninstall
+code first:
+
+```
+zaga_installer protect --code <uninstall code>
+zaga_installer unprotect --code <uninstall code>
+```
+
+## 5. Uninstall
+
+```
+zaga_installer uninstall
+```
+
+If removal protection is on, pass `--code <uninstall code>`. Uninstall unregisters
+the provider, deletes the files, and clears all settings.
+
+## 6. Fast test loop (no sign-out)
+
+`provider_host.exe` loads the real DLL and drives the provider, filter, and
+credential through a full unlock without LogonUI:
 
 ```
 ctest --test-dir build -C Debug -R provider_host --output-on-failure
 ```
 
-Run this after any change to the provider before touching a live logon.
+Run this after any provider change before touching a live logon.
 
-## 4. Test on the logon screen (VM)
+## 7. Live logon test (VM)
 
 1. Snapshot the VM.
-2. Copy the DLL in and `regsvr32` it (step 1).
-3. Provision a locked store (step 2).
+2. `zaga_installer install`, then `provision`, then `enable`.
+3. Set the store's deadline in the past (or use an overdue bundle) so the device
+   is locked.
 4. Lock the workstation (Win+L) or sign out.
-5. Confirm only the Zaga tile appears, showing the account number and status.
-6. Enter a wrong code — it must stay locked with an error.
-7. Enter a valid code — the tile reports success; a re-enumeration then reveals
-   the normal sign-in so you can log in as usual.
-8. Revert the snapshot when done.
+5. Confirm only the Zaga tile appears with the account number and status.
+6. Wrong code must stay locked with an error; a valid code reports success and a
+   re-enumeration then reveals normal sign-in.
+7. Revert the snapshot.
 
-## 5. Recovery if you get locked out
+## 8. Recovery if you get locked out
 
-If a build blocks sign-in, boot into Safe Mode or the recovery command prompt and
-delete the registry keys from step 1 (or run `regsvr32 /u`), then reboot. Keep the
-class id handy so you can find the keys offline. This is exactly why the live test
-belongs in a snapshotted VM.
+Boot into Safe Mode or the recovery command prompt and either run
+`zaga_installer uninstall` or delete the registry keys by hand, then reboot. This
+is exactly why the live test belongs in a snapshotted VM.
 
 ## Current limitations
 
 - The tile image is a solid brand-colored placeholder; a real logo resource comes
   later.
-- The provider only lifts the gate. It does not itself complete a Windows logon —
-  after unlock, the standard providers handle authentication. The re-enumeration
-  handoff needs confirmation on real hardware across Windows 10 and 11 builds.
-- Provisioning and uninstall-authorization UI are later milestones.
+- Provisioning takes the bundle on the command line; pulling it from the portal
+  over the network is the next step.
+- The provider only lifts the gate; it does not complete a Windows logon. The
+  post-unlock handoff needs confirmation on real Windows 10 and 11 builds.

@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include "DeviceConfig.h"
 #include "LocalStore.h"
 
 namespace zaga {
@@ -60,24 +61,35 @@ std::wstring LockGate::storePath() {
 GateInfo LockGate::describe() {
     GateInfo info{};
     info.provisioned = false;
-    info.locked = true;
-    info.statusText = "Device locked";
+    info.locked = false;
+
+    bool enabled = DeviceConfig::lockEnabled();
 
     StoredDevice device;
-    if (!LocalStore::load(storePath(), device)) {
+    bool loaded = LocalStore::load(storePath(), device);
+    if (loaded) {
+        info.provisioned = true;
+        info.accountNumber = device.accountNumber;
+        info.model = device.model;
+        info.serial = device.serial;
+        info.name = device.name;
+        info.deadlineText = formatDay(device.state.lockDeadlineDay);
+    }
+
+    // Enforcement off means the client is installed but dormant: it never gates
+    // login, whatever the store says.
+    if (!enabled) {
+        info.statusText = "Lock disabled";
         return info;
     }
 
-    info.provisioned = true;
-    info.accountNumber = device.accountNumber;
-    info.model = device.model;
-    info.serial = device.serial;
-    info.name = device.name;
+    if (!loaded) {
+        info.locked = true;
+        info.statusText = "Device locked";
+        return info;
+    }
 
-    int64_t today = todayDay();
-    info.deadlineText = formatDay(device.state.lockDeadlineDay);
-
-    if (today >= device.state.lockDeadlineDay) {
+    if (todayDay() >= device.state.lockDeadlineDay) {
         info.locked = true;
         info.statusText = "Payment overdue";
     } else {

@@ -8,6 +8,7 @@
 #include "Guid.h"
 #include "Fields.h"
 #include "LocalStore.h"
+#include "DeviceConfig.h"
 
 using namespace zaga;
 
@@ -54,6 +55,9 @@ int main() {
     DeleteFileW(storePath.c_str());
     seedLockedDevice(storePath);
     SetEnvironmentVariableW(L"ZAGA_STATE_PATH", storePath.c_str());
+    SetEnvironmentVariableW(L"ZAGA_CONFIG_HKCU", L"1");
+    DeviceConfig::removeAll();
+    DeviceConfig::setLockEnabled(true);
 
     HMODULE dll = LoadLibraryW(L"zaga_lock_provider.dll");
     if (dll == nullptr) {
@@ -138,6 +142,7 @@ int main() {
     credential->Release();
     provider->Release();
     factory->Release();
+    DeviceConfig::removeAll();
     DeleteFileW(storePath.c_str());
     FreeLibrary(dll);
 

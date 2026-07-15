@@ -19,9 +19,11 @@ add_library(zaga_core STATIC
     src/core/Verifier.cpp
     src/store/DataProtection.cpp
     src/store/LocalStore.cpp
+    src/config/DeviceConfig.cpp
+    src/gate/LockGate.cpp
 )
-target_include_directories(zaga_core PUBLIC src/core src/store)
-target_link_libraries(zaga_core PUBLIC bcrypt crypt32 shell32)
+target_include_directories(zaga_core PUBLIC src/core src/store src/config src/gate)
+target_link_libraries(zaga_core PUBLIC bcrypt crypt32 shell32 advapi32)
 
 enable_testing()
 
@@ -35,7 +37,6 @@ add_test(NAME store_tests COMMAND store_tests)
 
 add_library(zaga_lock_provider SHARED
     src/provider/Dll.cpp
-    src/provider/LockGate.cpp
     src/provider/ZagaProvider.cpp
     src/provider/ZagaCredential.cpp
 )
@@ -50,3 +51,12 @@ target_include_directories(provider_host PRIVATE src/provider)
 target_link_libraries(provider_host PRIVATE zaga_core ole32 uuid)
 add_dependencies(provider_host zaga_lock_provider)
 add_test(NAME provider_host COMMAND provider_host)
+
+add_executable(config_tests tests/config_tests.cpp)
+target_link_libraries(config_tests PRIVATE zaga_core)
+add_test(NAME config_tests COMMAND config_tests)
+
+add_executable(zaga_installer src/installer/Installer.cpp)
+target_link_libraries(zaga_installer PRIVATE zaga_core ole32 shell32)
+set_target_properties(zaga_installer PROPERTIES
+    LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\"")
