@@ -15,6 +15,7 @@ and the coding rules in `docs/DEVELOPMENT_STANDARDS.md`.
 - [docs/BUILD.md](docs/BUILD.md) — prerequisites, build and test commands, troubleshooting.
 - [docs/FUNCTIONALITY.md](docs/FUNCTIONALITY.md) — architecture, state model, and feature status.
 - [docs/INSTALL.md](docs/INSTALL.md) — registering and testing the credential provider (use a VM).
+- [docs/DEPLOY.md](docs/DEPLOY.md) — build a release, sign it, and install it on a device.
 
 ## Architecture
 
