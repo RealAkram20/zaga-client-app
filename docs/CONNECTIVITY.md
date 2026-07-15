@@ -82,7 +82,9 @@ It is valid for 24 hours and single-use.
 - Installer commands: `enroll --code <c> --url <u>` provisions from the portal,
   `heartbeat` checks in, `fetch-token` pulls a token and applies it through the
   offline verifier, `set-url` sets the base URL.
-- Still to wire: a scheduled task that runs `heartbeat` on an interval.
+- `install` copies the installer to the program folder and registers a SYSTEM
+  scheduled task (`Zaga Device Heartbeat`) that runs `heartbeat` hourly; `schedule`
+  and `unschedule` manage it by hand. `uninstall` removes it.
 
 Verified end to end against the running portal with the `net_host` harness: enroll
 returns the bundle and token, heartbeat authenticates, fetch-token returns the

@@ -28,8 +28,10 @@ From an elevated command prompt, in the folder holding both files:
 zaga_installer install
 ```
 
-This copies the DLL to `C:\Program Files\Zaga`, registers it (both as a provider
-and a filter), and leaves the lock disabled.
+This copies the DLL and the installer to `C:\Program Files\Zaga`, registers the
+provider (both as a provider and a filter), schedules an hourly SYSTEM check-in
+task (`Zaga Device Heartbeat`), and leaves the lock disabled. Manage the task by
+hand with `zaga_installer schedule` / `unschedule`.
 
 ## 2. Provision the device
 

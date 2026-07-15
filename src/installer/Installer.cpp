@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include "DeviceConfig.h"
 #include "LocalStore.h"
@@ -17,6 +18,8 @@ using namespace zaga;
 namespace {
 
 const wchar_t DLL_NAME[] = L"zaga_lock_provider.dll";
+const wchar_t INSTALLER_NAME[] = L"zaga_installer.exe";
+const wchar_t TASK_NAME[] = L"Zaga Device Heartbeat";
 const char AGENT_VERSION[] = "0.1.0";
 
 std::wstring exeDirectory() {
@@ -39,6 +42,57 @@ std::wstring installDirectory() {
 
 std::wstring installedDll() {
     return installDirectory() + L"\\" + DLL_NAME;
+}
+
+std::wstring installedInstaller() {
+    return installDirectory() + L"\\" + INSTALLER_NAME;
+}
+
+std::wstring selfPath() {
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    return std::wstring(path);
+}
+
+std::wstring systemExe(const wchar_t* name) {
+    wchar_t dir[MAX_PATH];
+    GetSystemDirectoryW(dir, MAX_PATH);
+    return std::wstring(dir) + L"\\" + name;
+}
+
+DWORD runProcess(const std::wstring& commandLine) {
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION process{};
+
+    std::vector<wchar_t> buffer(commandLine.begin(), commandLine.end());
+    buffer.push_back(L'\0');
+
+    if (!CreateProcessW(nullptr, buffer.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process)) {
+        return static_cast<DWORD>(-1);
+    }
+
+    WaitForSingleObject(process.hProcess, 30000);
+    DWORD exitCode = 0;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hProcess);
+    CloseHandle(process.hThread);
+    return exitCode;
+}
+
+bool registerHeartbeatTask() {
+    std::wstring command = systemExe(L"schtasks.exe") +
+        L" /Create /F /RU SYSTEM /SC HOURLY" +
+        L" /TN \"" + TASK_NAME + L"\"" +
+        L" /TR \"\\\"" + installedInstaller() + L"\\\" heartbeat\"";
+    return runProcess(command) == 0;
+}
+
+void removeHeartbeatTask() {
+    std::wstring command = systemExe(L"schtasks.exe") +
+        L" /Delete /F /TN \"" + TASK_NAME + L"\"";
+    runProcess(command);
 }
 
 bool callDllEntry(const std::wstring& dllPath, const char* entry) {
@@ -97,9 +151,14 @@ int doInstall() {
         return 1;
     }
 
+    CopyFileW(selfPath().c_str(), installedInstaller().c_str(), FALSE);
+    bool scheduled = registerHeartbeatTask();
+
     DeviceConfig::setLockEnabled(false);
 
     std::printf("Installed. The lock is OFF (dormant) and removal is not protected.\n");
+    std::printf("Hourly portal check-in %s.\n",
+                scheduled ? "scheduled" : "could not be scheduled");
     std::printf("Provision the device, then run \"zaga_installer enable\" to arm it.\n");
     return 0;
 }
@@ -113,8 +172,10 @@ int doUninstall(int argc, wchar_t** argv) {
         }
     }
 
+    removeHeartbeatTask();
     callDllEntry(installedDll(), "DllUnregisterServer");
     DeleteFileW(installedDll().c_str());
+    DeleteFileW(installedInstaller().c_str());
     RemoveDirectoryW(installDirectory().c_str());
     DeviceConfig::removeAll();
 
@@ -270,6 +331,7 @@ void usage() {
         "  provision --account --secret    write the device store from a bundle offline\n"
         "  heartbeat                       check in with the portal\n"
         "  fetch-token                     pull an unlock token from the portal and apply it\n"
+        "  schedule | unschedule           add or remove the hourly check-in task\n"
         "  set-url --url <u>               set the portal base url\n"
         "  enable | disable                turn the lock on or off\n"
         "  protect --code <c>              require a code to uninstall\n"
@@ -304,6 +366,16 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (command == L"fetch-token") {
         return doFetchToken();
+    }
+    if (command == L"schedule") {
+        std::printf(registerHeartbeatTask() ? "Hourly check-in scheduled.\n"
+                                            : "Could not schedule the check-in.\n");
+        return 0;
+    }
+    if (command == L"unschedule") {
+        removeHeartbeatTask();
+        std::printf("Check-in schedule removed.\n");
+        return 0;
     }
     if (command == L"set-url") {
         std::string url = argValue(argc, argv, L"--url");
