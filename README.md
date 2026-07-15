@@ -14,6 +14,7 @@ and the coding rules in `docs/DEVELOPMENT_STANDARDS.md`.
 
 - [docs/BUILD.md](docs/BUILD.md) — prerequisites, build and test commands, troubleshooting.
 - [docs/FUNCTIONALITY.md](docs/FUNCTIONALITY.md) — architecture, state model, and feature status.
+- [docs/INSTALL.md](docs/INSTALL.md) — registering and testing the credential provider (use a VM).
 
 ## Architecture
 
@@ -44,6 +45,6 @@ ctest --test-dir build -C Debug --output-on-failure
 ## Status
 
 - [x] Milestone 1 — verified token core with parity tests
-- [ ] Milestone 2 — DPAPI encrypted local store
-- [ ] Milestone 3 — credential provider COM shell
+- [x] Milestone 2 — DPAPI encrypted local store
+- [x] Milestone 3 — credential provider COM shell (built; live-logon verification pending)
 - [ ] Milestone 4 — enforcement service, uninstall auth, resilience

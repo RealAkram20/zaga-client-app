@@ -32,3 +32,21 @@ add_test(NAME core_tests COMMAND core_tests)
 add_executable(store_tests tests/store_tests.cpp)
 target_link_libraries(store_tests PRIVATE zaga_core)
 add_test(NAME store_tests COMMAND store_tests)
+
+add_library(zaga_lock_provider SHARED
+    src/provider/Dll.cpp
+    src/provider/LockGate.cpp
+    src/provider/ZagaProvider.cpp
+    src/provider/ZagaCredential.cpp
+)
+target_include_directories(zaga_lock_provider PUBLIC src/provider)
+target_link_libraries(zaga_lock_provider PRIVATE
+    zaga_core shlwapi ole32 oleaut32 advapi32 gdi32 user32 uuid)
+set_target_properties(zaga_lock_provider PROPERTIES
+    LINK_FLAGS "/DEF:\"${CMAKE_SOURCE_DIR}/src/provider/exports.def\"")
+
+add_executable(provider_host tests/provider_host.cpp)
+target_include_directories(provider_host PRIVATE src/provider)
+target_link_libraries(provider_host PRIVATE zaga_core ole32 uuid)
+add_dependencies(provider_host zaga_lock_provider)
+add_test(NAME provider_host COMMAND provider_host)

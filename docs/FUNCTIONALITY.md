@@ -40,7 +40,12 @@ src/core/     verification logic (no login-screen dependencies)
 src/store/    encrypted persistence
   DataProtection  machine-scope DPAPI wrapper (CryptProtectData)
   LocalStore      StoredDevice record, versioned serialization, atomic save/load
-src/provider/ credential provider COM shell                     [not yet built]
+src/provider/ credential provider COM shell
+  Guid / Fields   class id and the tile field layout
+  LockGate        bridge to the core: load store, read clock, apply a code
+  ZagaCredential  the tile: account, status, code entry, verify on submit
+  ZagaProvider    provider + filter: show the tile and gate other providers
+  Dll             class factory, exports, regsvr32 registration
 src/service/  enforcement + resilience service                 [not yet built]
 ```
 
@@ -92,9 +97,9 @@ Any failure leaves the device locked. The token and the secret are never logged.
 | -------------------------------------------------------------- | ------------- |
 | Token verification core, parity-tested against the portal      | **Done**      |
 | Encrypted local state store (DPAPI, machine scope)             | **Done**      |
-| Lock screen gating Windows login; show account number + status | Planned (M3)  |
-| Enter unlock code and unlock on success                        | Planned (M3)  |
-| Self-purchase: type a token bought online on another device    | Planned (M3)  |
+| Lock screen gating Windows login; show account number + status | **Built (M3)**, needs live-logon verification |
+| Enter unlock code and unlock on success                        | **Built (M3)**, needs live-logon verification |
+| Self-purchase: type a token bought online on another device    | **Built (M3)** — offline entry, portal payment separate |
 | Uninstall authorization (device-generated code)               | Planned (M4)  |
 | Enable / disable enforcement (technician-guarded)             | Planned (M4)  |
 | Reveal BIOS password / BitLocker recovery key when authorized | Planned (M4)  |
@@ -104,8 +109,10 @@ Any failure leaves the device locked. The token and the secret are never logged.
 
 1. **Verified token core** — codec, verifier, parity tests. *Complete.*
 2. **Encrypted local store** — DPAPI persistence. *Complete.*
-3. **Credential provider COM shell** — `ICredentialProvider` /
-   `ICredentialProviderCredential`, the actual lock screen, code entry.
+3. **Credential provider COM shell** — `ICredentialProvider`,
+   `ICredentialProviderCredential`, and `ICredentialProviderFilter`: the lock
+   tile, code entry, and gating of other providers. *Built; needs live-logon
+   verification on real Windows 10/11.* See `INSTALL.md`.
 4. **Enforcement and resilience** — background service, uninstall-code auth,
    registry/file self-healing, local tamper logging.
 
