@@ -1,0 +1,19 @@
+# Build output
+/build/
+/out/
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.dll
+
+# Visual Studio
+.vs/
+*.user
+CMakeSettings.json
+
+# Secrets and local state — never commit
+*.secret
+local-store/
