@@ -12,7 +12,7 @@ namespace zaga {
 namespace {
 
 const uint8_t MAGIC[4] = {'Z', 'G', 'S', '1'};
-constexpr uint8_t FORMAT_VERSION = 1;
+constexpr uint8_t FORMAT_VERSION = 2;
 
 class Writer {
 public:
@@ -175,6 +175,7 @@ std::vector<uint8_t> LocalStore::serialize(const StoredDevice& device) {
     writer.putString(device.biosPassword);
     writer.putString(device.recoveryKey);
     writer.putString(device.uninstallCode);
+    writer.putString(device.deviceToken);
     writer.putU32(device.state.lastCounter);
     writer.putI64(device.state.lockDeadlineDay);
     writer.putU8(static_cast<uint8_t>(device.state.status));
@@ -204,6 +205,7 @@ bool LocalStore::deserialize(const std::vector<uint8_t>& bytes, StoredDevice& de
         && reader.getString(device.biosPassword)
         && reader.getString(device.recoveryKey)
         && reader.getString(device.uninstallCode)
+        && reader.getString(device.deviceToken)
         && reader.getU32(device.state.lastCounter)
         && reader.getI64(device.state.lockDeadlineDay)
         && reader.getU8(status)

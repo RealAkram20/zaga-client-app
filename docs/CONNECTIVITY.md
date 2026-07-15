@@ -72,15 +72,21 @@ php artisan device:enroll-code ZG-40000
 
 It is valid for 24 hours and single-use.
 
-## Client responsibilities (to build)
+## Client side (built)
 
-- A WinHTTP caller for JSON GET/POST with a bearer header.
-- `PortalClient`: `enroll(code)`, `heartbeat()`, `fetchToken()`.
-- Store the base URL and device token; the secret goes only into the encrypted
-  store, never a log.
-- Installer `enroll --code <code> [--url <url>]` that provisions from the portal
-  instead of taking `--account`/`--secret` on the command line.
-- A scheduled check-in for heartbeat.
+- `src/net/HttpClient` — WinHTTP JSON GET/POST with a bearer header (http and https).
+- `src/net/Json` — a small JSON reader for the responses.
+- `src/net/PortalClient` — `enroll`, `heartbeat`, `fetchToken`.
+- The base URL lives in `DeviceConfig` (registry); the device token lives in the
+  encrypted store (`StoredDevice.deviceToken`, format v2). The secret is never logged.
+- Installer commands: `enroll --code <c> --url <u>` provisions from the portal,
+  `heartbeat` checks in, `fetch-token` pulls a token and applies it through the
+  offline verifier, `set-url` sets the base URL.
+- Still to wire: a scheduled task that runs `heartbeat` on an interval.
+
+Verified end to end against the running portal with the `net_host` harness: enroll
+returns the bundle and token, heartbeat authenticates, fetch-token returns the
+issued unlock code.
 
 ## Portal side (built, in the portal repo)
 

@@ -13,6 +13,9 @@ public:
     static bool lockEnabled();
     static void setLockEnabled(bool enabled);
 
+    static std::string portalUrl();
+    static void setPortalUrl(const std::string& url);
+
     static bool uninstallProtected();
 
     static void setUninstallCode(const std::string& code);

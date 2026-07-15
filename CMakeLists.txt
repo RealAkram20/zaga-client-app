@@ -21,9 +21,12 @@ add_library(zaga_core STATIC
     src/store/LocalStore.cpp
     src/config/DeviceConfig.cpp
     src/gate/LockGate.cpp
+    src/net/Json.cpp
+    src/net/HttpClient.cpp
+    src/net/PortalClient.cpp
 )
-target_include_directories(zaga_core PUBLIC src/core src/store src/config src/gate)
-target_link_libraries(zaga_core PUBLIC bcrypt crypt32 shell32 advapi32)
+target_include_directories(zaga_core PUBLIC src/core src/store src/config src/gate src/net)
+target_link_libraries(zaga_core PUBLIC bcrypt crypt32 shell32 advapi32 winhttp)
 
 enable_testing()
 
@@ -55,6 +58,14 @@ add_test(NAME provider_host COMMAND provider_host)
 add_executable(config_tests tests/config_tests.cpp)
 target_link_libraries(config_tests PRIVATE zaga_core)
 add_test(NAME config_tests COMMAND config_tests)
+
+add_executable(json_tests tests/json_tests.cpp)
+target_link_libraries(json_tests PRIVATE zaga_core)
+add_test(NAME json_tests COMMAND json_tests)
+
+# Manual connectivity harness; needs a live portal, so it is not a ctest.
+add_executable(net_host tests/net_host.cpp)
+target_link_libraries(net_host PRIVATE zaga_core)
 
 add_executable(zaga_installer src/installer/Installer.cpp)
 target_link_libraries(zaga_installer PRIVATE zaga_core ole32 shell32)

@@ -17,6 +17,7 @@ struct StoredDevice {
     std::string biosPassword;
     std::string recoveryKey;
     std::string uninstallCode;
+    std::string deviceToken;
     DeviceState state;
 };
 

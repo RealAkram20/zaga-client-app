@@ -13,6 +13,31 @@ namespace {
 const wchar_t SUBKEY[] = L"SOFTWARE\\Zaga";
 const wchar_t VALUE_LOCK_ENABLED[] = L"LockEnabled";
 const wchar_t VALUE_UNINSTALL_CODE[] = L"UninstallCode";
+const wchar_t VALUE_PORTAL_URL[] = L"PortalUrl";
+
+std::string narrow(const std::wstring& text) {
+    if (text.empty()) {
+        return std::string();
+    }
+    int length = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string narrowed(length > 0 ? length - 1 : 0, '\0');
+    if (length > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &narrowed[0], length, nullptr, nullptr);
+    }
+    return narrowed;
+}
+
+std::wstring widen(const std::string& text) {
+    if (text.empty()) {
+        return std::wstring();
+    }
+    int length = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+    std::wstring wide(length > 0 ? length - 1 : 0, L'\0');
+    if (length > 0) {
+        MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &wide[0], length);
+    }
+    return wide;
+}
 
 // Tests set ZAGA_CONFIG_HKCU so the round-trip can write under the current user
 // instead of HKLM, which needs elevation. The provider never sets it, so at the
@@ -65,6 +90,20 @@ bool DeviceConfig::lockEnabled() {
 
 void DeviceConfig::setLockEnabled(bool enabled) {
     writeDword(VALUE_LOCK_ENABLED, enabled ? 1 : 0);
+}
+
+std::string DeviceConfig::portalUrl() {
+    wchar_t buffer[512];
+    DWORD size = sizeof(buffer);
+    LONG result = RegGetValueW(rootKey(), SUBKEY, VALUE_PORTAL_URL, RRF_RT_REG_SZ,
+                               nullptr, buffer, &size);
+    return result == ERROR_SUCCESS ? narrow(buffer) : std::string();
+}
+
+void DeviceConfig::setPortalUrl(const std::string& url) {
+    std::wstring wide = widen(url);
+    RegSetKeyValueW(rootKey(), SUBKEY, VALUE_PORTAL_URL, REG_SZ,
+                    wide.c_str(), static_cast<DWORD>((wide.size() + 1) * sizeof(wchar_t)));
 }
 
 bool DeviceConfig::uninstallProtected() {

@@ -7,6 +7,7 @@
 #include "DeviceConfig.h"
 #include "LocalStore.h"
 #include "LockGate.h"
+#include "PortalClient.h"
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -16,6 +17,7 @@ using namespace zaga;
 namespace {
 
 const wchar_t DLL_NAME[] = L"zaga_lock_provider.dll";
+const char AGENT_VERSION[] = "0.1.0";
 
 std::wstring exeDirectory() {
     wchar_t path[MAX_PATH];
@@ -53,11 +55,22 @@ bool callDllEntry(const std::wstring& dllPath, const char* entry) {
     return SUCCEEDED(hr);
 }
 
+std::string narrow(const std::wstring& text) {
+    if (text.empty()) {
+        return std::string();
+    }
+    int length = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string narrowed(length > 0 ? length - 1 : 0, '\0');
+    if (length > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &narrowed[0], length, nullptr, nullptr);
+    }
+    return narrowed;
+}
+
 std::string argValue(int argc, wchar_t** argv, const wchar_t* name) {
     for (int i = 2; i + 1 < argc; ++i) {
         if (_wcsicmp(argv[i], name) == 0) {
-            std::wstring value = argv[i + 1];
-            return std::string(value.begin(), value.end());
+            return narrow(argv[i + 1]);
         }
     }
     return std::string();
@@ -134,6 +147,83 @@ int doProvision(int argc, wchar_t** argv) {
     return 0;
 }
 
+std::string resolvePortalUrl(int argc, wchar_t** argv) {
+    std::string url = argValue(argc, argv, L"--url");
+    if (!url.empty()) {
+        DeviceConfig::setPortalUrl(url);
+        return url;
+    }
+    return DeviceConfig::portalUrl();
+}
+
+int doEnroll(int argc, wchar_t** argv) {
+    std::string code = argValue(argc, argv, L"--code");
+    std::string portal = resolvePortalUrl(argc, argv);
+    if (code.empty() || portal.empty()) {
+        std::printf("Usage: zaga_installer enroll --code <code> --url <portal url>\n");
+        return 1;
+    }
+
+    EnrollResult result = PortalClient(portal).enroll(code, AGENT_VERSION);
+    if (!result.ok) {
+        std::printf("Enrollment failed: %s\n", result.message.c_str());
+        return 1;
+    }
+
+    StoredDevice device;
+    device.accountNumber = result.accountNumber;
+    device.hmacSecretHex = result.hmacSecret;
+    device.serial = result.serial;
+    device.model = result.model;
+    device.name = result.name;
+    device.deviceToken = result.token;
+
+    if (!LocalStore::save(LocalStore::defaultPath(), device)) {
+        std::printf("Enrolled, but could not write the device store (run as administrator).\n");
+        return 1;
+    }
+
+    std::printf("Enrolled %s from the portal. The device store is written.\n",
+                result.accountNumber.c_str());
+    return 0;
+}
+
+int doHeartbeat() {
+    std::string portal = DeviceConfig::portalUrl();
+    StoredDevice device;
+    if (portal.empty() || !LocalStore::load(LocalStore::defaultPath(), device) ||
+        device.deviceToken.empty()) {
+        std::printf("Not enrolled. Run \"enroll\" first.\n");
+        return 1;
+    }
+
+    GateInfo info = LockGate::describe();
+    bool ok = PortalClient(portal).heartbeat(device.deviceToken, info.statusText, AGENT_VERSION);
+    std::printf(ok ? "Checked in with the portal.\n" : "Could not reach the portal.\n");
+    return ok ? 0 : 1;
+}
+
+int doFetchToken() {
+    std::string portal = DeviceConfig::portalUrl();
+    StoredDevice device;
+    if (portal.empty() || !LocalStore::load(LocalStore::defaultPath(), device) ||
+        device.deviceToken.empty()) {
+        std::printf("Not enrolled. Run \"enroll\" first.\n");
+        return 1;
+    }
+
+    TokenResult result = PortalClient(portal).fetchToken(device.deviceToken);
+    if (!result.ok) {
+        std::printf("Could not fetch a token: %s\n", result.message.c_str());
+        return 1;
+    }
+
+    std::string message;
+    VerifyResult applied = LockGate::applyCode(result.token, message);
+    std::printf("%s\n", message.c_str());
+    return applied == VerifyResult::Accepted ? 0 : 1;
+}
+
 int doProtect(int argc, wchar_t** argv) {
     std::string code = argValue(argc, argv, L"--code");
     if (code.empty()) {
@@ -176,7 +266,11 @@ void usage() {
         "Zaga Device Lock installer\n\n"
         "  install                         copy and register the provider (dormant)\n"
         "  uninstall [--code <c>]          unregister and remove\n"
-        "  provision --account --secret    write the device store from a bundle\n"
+        "  enroll --code <c> --url <u>     provision from the portal over the network\n"
+        "  provision --account --secret    write the device store from a bundle offline\n"
+        "  heartbeat                       check in with the portal\n"
+        "  fetch-token                     pull an unlock token from the portal and apply it\n"
+        "  set-url --url <u>               set the portal base url\n"
         "  enable | disable                turn the lock on or off\n"
         "  protect --code <c>              require a code to uninstall\n"
         "  unprotect --code <c>            remove uninstall protection\n"
@@ -201,6 +295,25 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (command == L"provision") {
         return doProvision(argc, argv);
+    }
+    if (command == L"enroll") {
+        return doEnroll(argc, argv);
+    }
+    if (command == L"heartbeat") {
+        return doHeartbeat();
+    }
+    if (command == L"fetch-token") {
+        return doFetchToken();
+    }
+    if (command == L"set-url") {
+        std::string url = argValue(argc, argv, L"--url");
+        if (url.empty()) {
+            std::printf("Usage: zaga_installer set-url --url <portal url>\n");
+            return 1;
+        }
+        DeviceConfig::setPortalUrl(url);
+        std::printf("Portal URL set.\n");
+        return 0;
     }
     if (command == L"enable") {
         DeviceConfig::setLockEnabled(true);

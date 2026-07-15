@@ -32,6 +32,7 @@ StoredDevice sampleDevice() {
     device.biosPassword = "bios-secret";
     device.recoveryKey = "111111-222222-333333-444444-555555-666666-777777-888888";
     device.uninstallCode = "UNINSTALL-9876";
+    device.deviceToken = "1|N2bXh9AchvGAfLHIfgOTHMnFHPpHi1GqMhptRo2z";
     device.state.lastCounter = 42;
     device.state.lockDeadlineDay = 20123;
     device.state.status = DeviceStatus::Active;
@@ -48,6 +49,7 @@ bool sameDevice(const StoredDevice& a, const StoredDevice& b) {
         && a.biosPassword == b.biosPassword
         && a.recoveryKey == b.recoveryKey
         && a.uninstallCode == b.uninstallCode
+        && a.deviceToken == b.deviceToken
         && a.state.lastCounter == b.state.lastCounter
         && a.state.lockDeadlineDay == b.state.lockDeadlineDay
         && a.state.status == b.state.status
