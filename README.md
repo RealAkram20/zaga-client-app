@@ -12,6 +12,9 @@ the per-device 32-byte `hmac_secret`.
 The protocol is specified in the portal repository's `docs/OFFLINE_CLIENT_GUIDE.md`
 and the coding rules in `docs/DEVELOPMENT_STANDARDS.md`.
 
+- [docs/BUILD.md](docs/BUILD.md) — prerequisites, build and test commands, troubleshooting.
+- [docs/FUNCTIONALITY.md](docs/FUNCTIONALITY.md) — architecture, state model, and feature status.
+
 ## Architecture
 
 The credential-provider COM layer is kept separate from the verification logic so
