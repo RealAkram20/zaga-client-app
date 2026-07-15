@@ -5,6 +5,11 @@ project(ZagaDeviceClient LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Statically link the MSVC runtime so the installer and the credential-provider
+# DLL run on a clean Windows machine with no Visual C++ redistributable, and so the
+# provider DLL does not depend on a CRT version inside the winlogon process.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 if(MSVC)
     add_compile_options(/W4 /permissive-)
 endif()
