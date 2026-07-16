@@ -10,8 +10,21 @@ a credential provider that misbehaves can block sign-in.
   `{B7A9E3C2-4D1F-4A88-9C2E-6F3B1D0A5E77}`).
 - `zaga_installer.exe` — installs, provisions, arms, and removes the client. It
   requests administrator rights, so double-clicking prompts for elevation.
+- `zaga_app.exe` — the desktop management app the user opens after install to see
+  device status and run actions. `install` copies it to the program folder and
+  creates a Start-menu shortcut ("Zaga Device Lock").
 
-Keep the two files together; the installer copies the DLL from its own folder.
+Keep the three files together; the installer copies the DLL and the app from its
+own folder. The app is optional — if only the DLL and installer are shipped, the
+install still succeeds and just skips the Start-menu entry.
+
+## Opening the app
+
+After install, open **Start menu → Zaga Device Lock**, or run `zaga_installer app`.
+The window shows the account number, device details, status, the portal URL and
+whether it is reachable, and buttons to enroll, enter an unlock code, arm/disarm the
+lock, pull a code from the portal, and uninstall. It runs unelevated and asks for a
+UAC prompt only when an action changes machine state.
 
 ## Off by default
 

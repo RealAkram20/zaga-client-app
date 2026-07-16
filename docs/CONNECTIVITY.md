@@ -20,10 +20,22 @@ portal cuts a single device off without touching any other.
 
 Redeems a one-time enrollment code and provisions the device. No auth. Throttled.
 
+The client reports its own firmware identity here, read from SMBIOS (`src/sys/
+HardwareInfo`), so the portal never depends on an operator typing a serial
+correctly. The firmware is authoritative: the portal overwrites its stored
+`serial`, `model`, and `manufacturer` with what the device reports.
+
 Request:
 
 ```json
-{ "code": "XO3UTYBP43", "agent_version": "0.1.0" }
+{
+  "code": "XO3UTYBP43",
+  "agent_version": "0.1.0",
+  "serial": "8CC1510VXF",
+  "model": "HP ProDesk 600 G6 Desktop Mini PC",
+  "manufacturer": "HP",
+  "hostname": "ARMGENIUS"
+}
 ```
 
 Response 200:
@@ -33,15 +45,18 @@ Response 200:
   "token": "1|abcd…",
   "account_number": "ZG-40000",
   "hmac_secret": "abab…64 hex…",
-  "serial": "5CG9482Q1B",
-  "model": "Dell Latitude 5490",
+  "serial": "8CC1510VXF",
+  "model": "HP ProDesk 600 G6 Desktop Mini PC",
+  "manufacturer": "HP",
   "name": "Reception PC"
 }
 ```
 
-Invalid or expired code returns 422. The code is consumed on first success. The
-client writes the account number and secret into its encrypted store and keeps the
-token for later calls.
+`name` stays the operator's label, falling back to the reported hostname when no
+label was set. Invalid or expired code returns 422, as does a reported serial that
+is already registered to a different device. The code is consumed on first success.
+The client writes the account number and secret into its encrypted store and keeps
+the token for later calls.
 
 ### POST /api/device/heartbeat
 

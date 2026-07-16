@@ -46,8 +46,31 @@ src/provider/ credential provider COM shell
   ZagaCredential  the tile: account, status, code entry, verify on submit
   ZagaProvider    provider + filter: show the tile and gate other providers
   Dll             class factory, exports, regsvr32 registration
+src/app/      desktop management app (Win32 GUI)
+  ZagaApp         dashboard window: device info, portal state, and actions
 src/service/  enforcement + resilience service                 [not yet built]
 ```
+
+## 3a. The desktop management app
+
+`zaga_app.exe` is the window a user or technician opens after install (Start menu →
+Zaga Device Lock). It is a native Win32 GUI drawn by hand — no UI toolkit — so it
+stays as dependency-free as the rest of the client. It shows, for this device:
+
+- the account number (with a Copy button), device name, model, and serial;
+- the status badge — Active, Locked, Not provisioned, or Dormant;
+- the renewal / lock deadline;
+- whether enforcement is armed or dormant, and whether removal is protected;
+- the portal URL and whether the portal is reachable right now (a background
+  heartbeat, so the UI never blocks on the network).
+
+Its actions are: enroll (or re-enroll) the device, enter an unlock code, arm or
+disarm enforcement, pull the latest unlock code from the portal, check in now, open
+the portal in a browser, and uninstall. The app itself runs **unelevated**; every
+action that writes machine state is delegated to `zaga_installer.exe` with a UAC
+prompt, so displaying status never needs administrator rights while privileged
+changes still ask for consent. Read-only status comes straight from the tested core
+(`LockGate::describe`, `DeviceConfig`, `LocalStore`).
 
 ## 4. The token, in short
 
@@ -100,6 +123,7 @@ Any failure leaves the device locked. The token and the secret are never logged.
 | Lock screen gating Windows login; show account number + status | **Built (M3)**, needs live-logon verification |
 | Enter unlock code and unlock on success                        | **Built (M3)**, needs live-logon verification |
 | Self-purchase: type a token bought online on another device    | **Built (M3)** — offline entry, portal payment separate |
+| Desktop management app: view device info, portal state, actions | **Done** — `zaga_app.exe`, opened from the Start menu |
 | Uninstall authorization (device-generated code)               | Planned (M4)  |
 | Enable / disable enforcement (technician-guarded)             | Planned (M4)  |
 | Reveal BIOS password / BitLocker recovery key when authorized | Planned (M4)  |

@@ -1,0 +1,5 @@
+#include "Resource.h"
+
+// Path is relative to this .rc file. The .ico is multi-resolution (16-256 px), so
+// Windows picks the right size for the taskbar, Alt-Tab, and shortcuts.
+IDI_ZAGA ICON "../../assets/zaga.ico"

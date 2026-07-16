@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <objbase.h>
 
 #include <cstdio>
 #include <iostream>
@@ -14,6 +15,7 @@
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "uuid.lib")
 
 using namespace zaga;
 
@@ -21,6 +23,8 @@ namespace {
 
 const wchar_t DLL_NAME[] = L"zaga_lock_provider.dll";
 const wchar_t INSTALLER_NAME[] = L"zaga_installer.exe";
+const wchar_t APP_NAME[] = L"zaga_app.exe";
+const wchar_t SHORTCUT_NAME[] = L"Zaga Device Lock.lnk";
 const wchar_t TASK_NAME[] = L"Zaga Device Heartbeat";
 const wchar_t UNINSTALL_KEY[] =
     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ZagaDeviceLock";
@@ -51,6 +55,50 @@ std::wstring installedDll() {
 
 std::wstring installedInstaller() {
     return installDirectory() + L"\\" + INSTALLER_NAME;
+}
+
+std::wstring installedApp() {
+    return installDirectory() + L"\\" + APP_NAME;
+}
+
+// The Start-menu (All Users) shortcut that launches the management app.
+std::wstring startMenuShortcut() {
+    PWSTR programs = nullptr;
+    std::wstring base = L"C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs";
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_CommonPrograms, 0, nullptr, &programs))) {
+        base = programs;
+        CoTaskMemFree(programs);
+    }
+    return base + L"\\" + SHORTCUT_NAME;
+}
+
+// Write a .lnk pointing at the installed app. Best-effort: a missing shortcut only
+// costs the Start-menu entry, not the install.
+bool createShortcut(const std::wstring& target, const std::wstring& link,
+                    const std::wstring& description) {
+    bool ownInit = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
+    IShellLinkW* shellLink = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_IShellLinkW, reinterpret_cast<void**>(&shellLink)))) {
+        shellLink->SetPath(target.c_str());
+        std::wstring workDir = installDirectory();
+        shellLink->SetWorkingDirectory(workDir.c_str());
+        shellLink->SetDescription(description.c_str());
+        shellLink->SetIconLocation(target.c_str(), 0);
+
+        IPersistFile* persist = nullptr;
+        if (SUCCEEDED(shellLink->QueryInterface(IID_IPersistFile,
+                                                reinterpret_cast<void**>(&persist)))) {
+            ok = SUCCEEDED(persist->Save(link.c_str(), TRUE));
+            persist->Release();
+        }
+        shellLink->Release();
+    }
+    if (ownInit) {
+        CoUninitialize();
+    }
+    return ok;
 }
 
 std::wstring selfPath() {
@@ -86,11 +134,11 @@ DWORD runProcess(const std::wstring& commandLine) {
     return exitCode;
 }
 
-bool registerHeartbeatTask() {
+bool registerHeartbeatTask(const std::wstring& exePath) {
     std::wstring command = systemExe(L"schtasks.exe") +
         L" /Create /F /RU SYSTEM /SC HOURLY" +
         L" /TN \"" + TASK_NAME + L"\"" +
-        L" /TR \"\\\"" + installedInstaller() + L"\\\" heartbeat\"";
+        L" /TR \"\\\"" + exePath + L"\\\" heartbeat\"";
     return runProcess(command) == 0;
 }
 
@@ -125,7 +173,7 @@ void registerAddRemove() {
     setString(L"DisplayVersion", DISPLAY_VERSION);
     setString(L"Publisher", L"Zaga");
     setString(L"InstallLocation", installDirectory());
-    setString(L"DisplayIcon", exe);
+    setString(L"DisplayIcon", installedApp());
     setString(L"UninstallString", L"\"" + exe + L"\" uninstall-ui");
     setString(L"QuietUninstallString", L"\"" + exe + L"\" uninstall");
     setDword(L"NoModify", 1);
@@ -228,15 +276,59 @@ int doInstall() {
     }
 
     CopyFileW(selfPath().c_str(), installedInstaller().c_str(), FALSE);
-    bool scheduled = registerHeartbeatTask();
+
+    // Deploy the management app and a Start-menu shortcut so the user (or a
+    // technician) has a real window to open after install. Both are optional: if
+    // the app is not shipped next to the installer, the rest still works.
+    std::wstring appSource = exeDirectory() + L"\\" + APP_NAME;
+    bool haveApp = CopyFileW(appSource.c_str(), installedApp().c_str(), FALSE) != 0;
+    if (haveApp) {
+        createShortcut(installedApp(), startMenuShortcut(), L"Zaga Device Lock");
+    }
+
+    bool scheduled = registerHeartbeatTask(installedInstaller());
     registerAddRemove();
 
     DeviceConfig::setLockEnabled(false);
 
     std::printf("Installed. The lock is OFF (dormant) and removal is not protected.\n");
+    std::printf("Management app: %s\n",
+                haveApp ? "installed (Start menu > Zaga Device Lock)"
+                        : "not shipped next to the installer (skipped)");
     std::printf("Hourly portal check-in %s.\n",
                 scheduled ? "scheduled" : "could not be scheduled");
     std::printf("Provision the device, then run \"zaga_installer enable\" to arm it.\n");
+    return 0;
+}
+
+// Thin registration for a packaged install (the Inno wizard). The package owns the
+// files, shortcuts, and Add/Remove entry; this only registers the COM provider
+// beside the exe, schedules the check-in, and defaults the lock to dormant.
+int doRegister() {
+    std::wstring dll = exeDirectory() + L"\\" + DLL_NAME;
+    if (GetFileAttributesW(dll.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::printf("Provider DLL not found next to the installer.\n");
+        return 1;
+    }
+    if (!callDllEntry(dll, "DllRegisterServer")) {
+        std::printf("Provider registration failed (run as administrator).\n");
+        return 1;
+    }
+
+    bool scheduled = registerHeartbeatTask(selfPath());
+    DeviceConfig::setLockEnabled(false);
+
+    std::printf("Registered. The lock is dormant; hourly check-in %s.\n",
+                scheduled ? "scheduled" : "could not be scheduled");
+    return 0;
+}
+
+// Undo doRegister for a packaged uninstall. The package removes the files.
+int doUnregister() {
+    removeHeartbeatTask();
+    callDllEntry(exeDirectory() + L"\\" + DLL_NAME, "DllUnregisterServer");
+    DeviceConfig::removeAll();
+    std::printf("Unregistered. The provider is removed and settings are cleared.\n");
     return 0;
 }
 
@@ -252,9 +344,23 @@ int doUninstall(int argc, wchar_t** argv) {
     removeHeartbeatTask();
     unregisterAddRemove();
     callDllEntry(installedDll(), "DllUnregisterServer");
-    DeleteFileW(installedDll().c_str());
-    DeleteFileW(installedInstaller().c_str());
-    RemoveDirectoryW(installDirectory().c_str());
+    DeleteFileW(startMenuShortcut().c_str());
+
+    // Delete the program files, falling back to a delete-on-reboot for anything
+    // still in use — e.g. the app exe when uninstall was launched from the app,
+    // or this installer if it is running from the install folder.
+    auto removeFile = [](const std::wstring& path) {
+        if (!DeleteFileW(path.c_str()) &&
+            GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            MoveFileExW(path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+        }
+    };
+    removeFile(installedApp());
+    removeFile(installedDll());
+    removeFile(installedInstaller());
+    if (!RemoveDirectoryW(installDirectory().c_str())) {
+        MoveFileExW(installDirectory().c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+    }
     DeviceConfig::removeAll();
 
     std::printf("Uninstalled. The provider is unregistered and settings are cleared.\n");
@@ -345,6 +451,19 @@ int doHeartbeat() {
     return ok ? 0 : 1;
 }
 
+int doApplyCode(int argc, wchar_t** argv) {
+    std::string code = argValue(argc, argv, L"--code");
+    if (code.empty()) {
+        std::printf("Usage: zaga_installer apply-code --code <unlock code>\n");
+        return 1;
+    }
+
+    std::string message;
+    VerifyResult applied = LockGate::applyCode(code, message);
+    std::printf("%s\n", message.c_str());
+    return applied == VerifyResult::Accepted ? 0 : 1;
+}
+
 int doFetchToken() {
     std::string portal = DeviceConfig::portalUrl();
     StoredDevice device;
@@ -420,7 +539,15 @@ int runSetup() {
     }
 
     std::printf("\nSetup complete. The lock is installed and dormant.\n");
-    std::printf("After provisioning, arm the lock with:  zaga_installer enable\n");
+    std::printf("Open the Zaga app any time from the Start menu to see device status.\n");
+
+    if (GetFileAttributesW(installedApp().c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::string open = promptLine("Open the Zaga app now? [Y/n]: ");
+        if (open.empty() || open[0] == 'y' || open[0] == 'Y') {
+            ShellExecuteW(nullptr, L"open", installedApp().c_str(), nullptr, nullptr,
+                          SW_SHOWNORMAL);
+        }
+    }
     pauseForUser();
     return 0;
 }
@@ -431,16 +558,19 @@ void usage() {
         "  (double-click)                  guided setup with a UAC prompt\n"
         "  install                         copy and register the provider (dormant)\n"
         "  uninstall [--code <c>]          unregister and remove\n"
+        "  register | unregister           provider reg only (used by the setup package)\n"
         "  enroll --code <c> --url <u>     provision from the portal over the network\n"
         "  provision --account --secret    write the device store from a bundle offline\n"
         "  heartbeat                       check in with the portal\n"
         "  fetch-token                     pull an unlock token from the portal and apply it\n"
+        "  apply-code --code <c>           apply a typed unlock code through the verifier\n"
         "  schedule | unschedule           add or remove the hourly check-in task\n"
         "  set-url --url <u>               set the portal base url\n"
         "  enable | disable                turn the lock on or off\n"
         "  protect --code <c>              require a code to uninstall\n"
         "  unprotect --code <c>            remove uninstall protection\n"
-        "  status                          show the current state\n");
+        "  status                          show the current state\n"
+        "  app                             open the desktop management app\n");
 }
 
 }
@@ -482,7 +612,9 @@ int wmain(int argc, wchar_t** argv) {
 
     bool writesMachineState =
         command == L"install" || command == L"uninstall" || command == L"provision" ||
-        command == L"enroll" || command == L"fetch-token" || command == L"enable" ||
+        command == L"register" || command == L"unregister" ||
+        command == L"enroll" || command == L"fetch-token" || command == L"apply-code" ||
+        command == L"enable" ||
         command == L"disable" || command == L"protect" || command == L"unprotect" ||
         command == L"schedule" || command == L"unschedule" || command == L"set-url";
     if (writesMachineState && !requireAdmin()) {
@@ -491,6 +623,12 @@ int wmain(int argc, wchar_t** argv) {
 
     if (command == L"install") {
         return doInstall();
+    }
+    if (command == L"register") {
+        return doRegister();
+    }
+    if (command == L"unregister") {
+        return doUnregister();
     }
     if (command == L"uninstall") {
         return doUninstall(argc, argv);
@@ -507,9 +645,13 @@ int wmain(int argc, wchar_t** argv) {
     if (command == L"fetch-token") {
         return doFetchToken();
     }
+    if (command == L"apply-code") {
+        return doApplyCode(argc, argv);
+    }
     if (command == L"schedule") {
-        std::printf(registerHeartbeatTask() ? "Hourly check-in scheduled.\n"
-                                            : "Could not schedule the check-in.\n");
+        std::printf(registerHeartbeatTask(installedInstaller())
+                        ? "Hourly check-in scheduled.\n"
+                        : "Could not schedule the check-in.\n");
         return 0;
     }
     if (command == L"unschedule") {
@@ -545,6 +687,14 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (command == L"status") {
         return doStatus();
+    }
+    if (command == L"app") {
+        std::wstring app = installedApp();
+        if (GetFileAttributesW(app.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            app = exeDirectory() + L"\\" + APP_NAME; // dev: run from the build folder
+        }
+        ShellExecuteW(nullptr, L"open", app.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return 0;
     }
 
     usage();

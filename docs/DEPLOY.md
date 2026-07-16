@@ -15,12 +15,17 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-Ship these two files together, in one folder:
+Ship these three files together, in one folder:
 
 ```
 build\Release\zaga_installer.exe
 build\Release\zaga_lock_provider.dll
+build\Release\zaga_app.exe
 ```
+
+`zaga_app.exe` is the desktop management app; the installer copies it into the
+program folder and adds a Start-menu shortcut. It is optional — the installer works
+with just the DLL beside it — but ship it so the device has a real UI to open.
 
 ## 2. Why "unknown publisher" appears
 
@@ -40,7 +45,7 @@ $cert = New-SelfSignedCertificate -Type CodeSigningCert `
     -CertStoreLocation Cert:\CurrentUser\My `
     -FriendlyName "Zaga Code Signing" -NotAfter (Get-Date).AddYears(5)
 
-foreach ($f in "zaga_installer.exe","zaga_lock_provider.dll") {
+foreach ($f in "zaga_installer.exe","zaga_lock_provider.dll","zaga_app.exe") {
     Set-AuthenticodeSignature -FilePath ".\$f" -Certificate $cert `
         -HashAlgorithm SHA256 -TimestampServer "http://timestamp.digicert.com"
 }
@@ -70,10 +75,11 @@ blocked. This step is a natural part of imaging or provisioning a fleet device.
 ### Guided (double-click)
 
 Double-click `zaga_installer.exe`. It requests administrator rights through a UAC
-prompt, installs the provider (dormant), schedules the hourly check-in, registers
-an entry in *Add or remove programs*, and then offers to provision: enter the
-portal URL and a one-time enrollment code, or leave the URL blank to skip. The
-window stays open so you can read the result.
+prompt, installs the provider (dormant), copies the management app and adds its
+Start-menu shortcut, schedules the hourly check-in, registers an entry in *Add or
+remove programs*, and then offers to provision: enter the portal URL and a one-time
+enrollment code, or leave the URL blank to skip. It finally offers to open the Zaga
+app, and the window stays open so you can read the result.
 
 ### Command line
 

@@ -29,8 +29,9 @@ add_library(zaga_core STATIC
     src/net/Json.cpp
     src/net/HttpClient.cpp
     src/net/PortalClient.cpp
+    src/sys/HardwareInfo.cpp
 )
-target_include_directories(zaga_core PUBLIC src/core src/store src/config src/gate src/net)
+target_include_directories(zaga_core PUBLIC src/core src/store src/config src/gate src/net src/sys)
 target_link_libraries(zaga_core PUBLIC bcrypt crypt32 shell32 advapi32 winhttp)
 
 enable_testing()
@@ -68,11 +69,24 @@ add_executable(json_tests tests/json_tests.cpp)
 target_link_libraries(json_tests PRIVATE zaga_core)
 add_test(NAME json_tests COMMAND json_tests)
 
+add_executable(hardware_tests tests/hardware_tests.cpp)
+target_link_libraries(hardware_tests PRIVATE zaga_core)
+add_test(NAME hardware_tests COMMAND hardware_tests)
+
 # Manual connectivity harness; needs a live portal, so it is not a ctest.
 add_executable(net_host tests/net_host.cpp)
 target_link_libraries(net_host PRIVATE zaga_core)
 
-add_executable(zaga_installer src/installer/Installer.cpp)
+# Desktop management app: the GUI window the user opens to see device status and
+# run the privileged actions (which it delegates to zaga_installer with a UAC
+# prompt). WIN32 so there is no console window.
+add_executable(zaga_app WIN32 src/app/ZagaApp.cpp src/app/Zaga.rc)
+target_link_libraries(zaga_app PRIVATE zaga_core comctl32 shell32 ole32)
+# The UI has non-ASCII glyphs (em dash, lock icon) in wide string literals; /utf-8
+# makes MSVC read the source as UTF-8 so they are not mangled.
+target_compile_options(zaga_app PRIVATE /utf-8)
+
+add_executable(zaga_installer src/installer/Installer.cpp src/app/Zaga.rc)
 target_link_libraries(zaga_installer PRIVATE zaga_core ole32 shell32)
 # Run in the caller's console (asInvoker) so output is visible. Admin-only steps
 # print a clear message when not elevated instead of flashing a separate window.

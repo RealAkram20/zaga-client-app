@@ -1,5 +1,6 @@
 #include "PortalClient.h"
 
+#include "HardwareInfo.h"
 #include "HttpClient.h"
 #include "Json.h"
 
@@ -52,8 +53,16 @@ std::string PortalClient::url(const std::string& path) const {
 EnrollResult PortalClient::enroll(const std::string& enrollmentCode, const std::string& agentVersion) {
     EnrollResult result{};
 
+    // Report what this machine actually is. The portal treats the firmware as
+    // authoritative, so an operator never has to type a serial correctly.
+    HardwareInfo hardware = Hardware::detect();
+
     std::string body = "{" + field("code", enrollmentCode) + "," +
-                       field("agent_version", agentVersion) + "}";
+                       field("agent_version", agentVersion) + "," +
+                       field("serial", hardware.serial) + "," +
+                       field("model", hardware.model) + "," +
+                       field("manufacturer", hardware.manufacturer) + "," +
+                       field("hostname", hardware.hostname) + "}";
 
     HttpResponse response = HttpClient::post(url("/api/device/enroll"), body);
     if (!response.completed) {

@@ -30,8 +30,18 @@ src/core/     plain C++, no login-screen dependencies (testable)
   Verifier    fail-closed accept / replay / deadline state machine
 src/store/    encrypted local state (DPAPI)            [milestone 2]
 src/provider/ ICredentialProvider COM shell             [milestone 3]
+src/app/      desktop management app (Win32 GUI dashboard)
 tests/        parity tests against the portal's published vectors
 ```
+
+## Desktop app
+
+After install, users open **Start menu → Zaga Device Lock** (`zaga_app.exe`) to see
+this device's account number, hardware, status, and portal connection, and to
+enroll, enter an unlock code, arm/disarm the lock, pull a code from the portal, or
+uninstall. It is a native Win32 window with no toolkit dependency; it runs
+unelevated and asks for a UAC prompt only for actions that change machine state. See
+[docs/FUNCTIONALITY.md](docs/FUNCTIONALITY.md) §3a.
 
 ## Build
 
