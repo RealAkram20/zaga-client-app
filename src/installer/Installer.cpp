@@ -1,7 +1,9 @@
 #include <windows.h>
 #include <shlobj.h>
+#include <shellapi.h>
 
 #include <cstdio>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -20,7 +22,10 @@ namespace {
 const wchar_t DLL_NAME[] = L"zaga_lock_provider.dll";
 const wchar_t INSTALLER_NAME[] = L"zaga_installer.exe";
 const wchar_t TASK_NAME[] = L"Zaga Device Heartbeat";
+const wchar_t UNINSTALL_KEY[] =
+    L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\ZagaDeviceLock";
 const char AGENT_VERSION[] = "0.1.0";
+const wchar_t DISPLAY_VERSION[] = L"0.1.0";
 
 std::wstring exeDirectory() {
     wchar_t path[MAX_PATH];
@@ -93,6 +98,56 @@ void removeHeartbeatTask() {
     std::wstring command = systemExe(L"schtasks.exe") +
         L" /Delete /F /TN \"" + TASK_NAME + L"\"";
     runProcess(command);
+}
+
+bool relaunchElevated(const std::wstring& parameters) {
+    std::wstring self = selfPath();
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.lpVerb = L"runas";
+    info.lpFile = self.c_str();
+    info.lpParameters = parameters.c_str();
+    info.nShow = SW_SHOWNORMAL;
+    return ShellExecuteExW(&info) == TRUE;
+}
+
+void registerAddRemove() {
+    std::wstring exe = installedInstaller();
+    auto setString = [&](const wchar_t* name, const std::wstring& value) {
+        RegSetKeyValueW(HKEY_LOCAL_MACHINE, UNINSTALL_KEY, name, REG_SZ,
+                        value.c_str(), static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    };
+    auto setDword = [&](const wchar_t* name, DWORD value) {
+        RegSetKeyValueW(HKEY_LOCAL_MACHINE, UNINSTALL_KEY, name, REG_DWORD, &value, sizeof(value));
+    };
+
+    setString(L"DisplayName", L"Zaga Device Lock");
+    setString(L"DisplayVersion", DISPLAY_VERSION);
+    setString(L"Publisher", L"Zaga");
+    setString(L"InstallLocation", installDirectory());
+    setString(L"DisplayIcon", exe);
+    setString(L"UninstallString", L"\"" + exe + L"\" uninstall-ui");
+    setString(L"QuietUninstallString", L"\"" + exe + L"\" uninstall");
+    setDword(L"NoModify", 1);
+    setDword(L"NoRepair", 1);
+}
+
+void unregisterAddRemove() {
+    RegDeleteTreeW(HKEY_LOCAL_MACHINE, UNINSTALL_KEY);
+}
+
+std::string promptLine(const char* label) {
+    std::printf("%s", label);
+    std::fflush(stdout);
+    std::string line;
+    std::getline(std::cin, line);
+    return line;
+}
+
+void pauseForUser() {
+    std::printf("\nPress Enter to close...");
+    std::string line;
+    std::getline(std::cin, line);
 }
 
 bool callDllEntry(const std::wstring& dllPath, const char* entry) {
@@ -174,6 +229,7 @@ int doInstall() {
 
     CopyFileW(selfPath().c_str(), installedInstaller().c_str(), FALSE);
     bool scheduled = registerHeartbeatTask();
+    registerAddRemove();
 
     DeviceConfig::setLockEnabled(false);
 
@@ -194,6 +250,7 @@ int doUninstall(int argc, wchar_t** argv) {
     }
 
     removeHeartbeatTask();
+    unregisterAddRemove();
     callDllEntry(installedDll(), "DllUnregisterServer");
     DeleteFileW(installedDll().c_str());
     DeleteFileW(installedInstaller().c_str());
@@ -238,14 +295,13 @@ std::string resolvePortalUrl(int argc, wchar_t** argv) {
     return DeviceConfig::portalUrl();
 }
 
-int doEnroll(int argc, wchar_t** argv) {
-    std::string code = argValue(argc, argv, L"--code");
-    std::string portal = resolvePortalUrl(argc, argv);
+int enrollWith(const std::string& code, const std::string& portal) {
     if (code.empty() || portal.empty()) {
         std::printf("Usage: zaga_installer enroll --code <code> --url <portal url>\n");
         return 1;
     }
 
+    DeviceConfig::setPortalUrl(portal);
     EnrollResult result = PortalClient(portal).enroll(code, AGENT_VERSION);
     if (!result.ok) {
         std::printf("Enrollment failed: %s\n", result.message.c_str());
@@ -268,6 +324,10 @@ int doEnroll(int argc, wchar_t** argv) {
     std::printf("Enrolled %s from the portal. The device store is written.\n",
                 result.accountNumber.c_str());
     return 0;
+}
+
+int doEnroll(int argc, wchar_t** argv) {
+    return enrollWith(argValue(argc, argv, L"--code"), resolvePortalUrl(argc, argv));
 }
 
 int doHeartbeat() {
@@ -343,9 +403,32 @@ int doStatus() {
     return 0;
 }
 
+int runSetup() {
+    std::printf("Zaga Device Lock setup\n\n");
+
+    int installed = doInstall();
+    if (installed != 0) {
+        pauseForUser();
+        return installed;
+    }
+
+    std::printf("\nProvision this device now? Leave the URL blank to skip.\n");
+    std::string url = promptLine("Portal URL (e.g. http://192.168.1.20/zagatech): ");
+    if (!url.empty()) {
+        std::string code = promptLine("Enrollment code: ");
+        enrollWith(code, url);
+    }
+
+    std::printf("\nSetup complete. The lock is installed and dormant.\n");
+    std::printf("After provisioning, arm the lock with:  zaga_installer enable\n");
+    pauseForUser();
+    return 0;
+}
+
 void usage() {
     std::printf(
         "Zaga Device Lock installer\n\n"
+        "  (double-click)                  guided setup with a UAC prompt\n"
         "  install                         copy and register the provider (dormant)\n"
         "  uninstall [--code <c>]          unregister and remove\n"
         "  enroll --code <c> --url <u>     provision from the portal over the network\n"
@@ -363,12 +446,39 @@ void usage() {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    // Double-click: run the guided setup, elevating through a UAC prompt first.
     if (argc < 2) {
-        usage();
-        return 1;
+        if (!isElevated()) {
+            relaunchElevated(L"setup");
+            return 0;
+        }
+        return runSetup();
     }
 
     std::wstring command = argv[1];
+
+    if (command == L"setup") {
+        if (!isElevated()) {
+            relaunchElevated(L"setup");
+            return 0;
+        }
+        return runSetup();
+    }
+
+    if (command == L"uninstall-ui") {
+        if (!isElevated()) {
+            relaunchElevated(L"uninstall-ui");
+            return 0;
+        }
+        int result = doUninstall(argc, argv);
+        pauseForUser();
+        return result;
+    }
+
+    if (command == L"help" || command == L"--help" || command == L"-h" || command == L"/?") {
+        usage();
+        return 0;
+    }
 
     bool writesMachineState =
         command == L"install" || command == L"uninstall" || command == L"provision" ||

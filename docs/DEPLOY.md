@@ -67,6 +67,16 @@ blocked. This step is a natural part of imaging or provisioning a fleet device.
 
 ## 5. Install and provision
 
+### Guided (double-click)
+
+Double-click `zaga_installer.exe`. It requests administrator rights through a UAC
+prompt, installs the provider (dormant), schedules the hourly check-in, registers
+an entry in *Add or remove programs*, and then offers to provision: enter the
+portal URL and a one-time enrollment code, or leave the URL blank to skip. The
+window stays open so you can read the result.
+
+### Command line
+
 From an elevated command prompt in the folder with both files:
 
 ```
@@ -80,6 +90,13 @@ zaga_installer enable
 - The portal address must be reachable from this device. On another machine that
   is not `localhost` — use the portal's LAN address or domain, e.g.
   `http://192.168.1.20/zagatech`. Check with `zaga_installer status`.
+
+### Uninstall
+
+Use **Settings → Apps → Installed apps → Zaga Device Lock → Uninstall**, or run
+`zaga_installer uninstall` from an elevated prompt. Both unregister the provider,
+remove the files and scheduled task, and clear all settings. If removal protection
+is on, the command line form needs `--code <uninstall code>`.
 
 ## 6. Selling to the public
 
