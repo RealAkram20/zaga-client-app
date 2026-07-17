@@ -87,7 +87,10 @@ target_link_libraries(zaga_app PRIVATE zaga_core comctl32 shell32 ole32)
 target_compile_options(zaga_app PRIVATE /utf-8)
 
 add_executable(zaga_installer src/installer/Installer.cpp src/app/Zaga.rc)
-target_link_libraries(zaga_installer PRIVATE zaga_core ole32 shell32)
+# wtsapi32: the heartbeat disconnects a signed-in session when the device is locked,
+# since the credential provider only guards the logon screen and has no say over a
+# session that is already open.
+target_link_libraries(zaga_installer PRIVATE zaga_core ole32 shell32 wtsapi32)
 # Run in the caller's console (asInvoker) so output is visible. Admin-only steps
 # print a clear message when not elevated instead of flashing a separate window.
 set_target_properties(zaga_installer PROPERTIES

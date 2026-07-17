@@ -45,6 +45,30 @@ int main() {
     check(!DeviceConfig::uninstallProtected(), "unprotected after clear");
     check(!DeviceConfig::checkUninstallCode("UNINSTALL-4821"), "cleared code no longer matches");
 
+    std::printf("device-generated uninstall code\n");
+    DeviceConfig::removeAll();
+    check(DeviceConfig::uninstallCode().empty(), "no code before one is generated");
+
+    std::string generated = DeviceConfig::ensureUninstallCode();
+    check(!generated.empty(), "a code is generated on demand");
+    // Storing the code is what arms protection, so a device is never left holding a
+    // code it does not enforce.
+    check(DeviceConfig::uninstallProtected(), "generating a code arms protection");
+    check(DeviceConfig::uninstallCode() == generated, "the generated code reads back");
+    check(DeviceConfig::checkUninstallCode(generated), "the generated code authorises removal");
+    check(!DeviceConfig::checkUninstallCode("AAAA-BBBB-CCCC"), "another code does not");
+
+    // Re-running install or enroll must not invalidate the code an operator has
+    // already recorded against the device on the portal.
+    check(DeviceConfig::ensureUninstallCode() == generated, "an existing code is kept, not reissued");
+
+    check(generated.find_first_of("IO01") == std::string::npos,
+          "the code avoids characters misread when typed by hand");
+
+    DeviceConfig::removeAll();
+    std::string second = DeviceConfig::ensureUninstallCode();
+    check(second != generated, "a different device gets a different code");
+
     DeviceConfig::removeAll();
 
     if (g_failures == 0) {

@@ -59,23 +59,146 @@ Filename: "{app}\zaga_app.exe"; Description: "Open Zaga Device Lock now"; \
     Flags: postinstall nowait skipifsilent
 
 [UninstallRun]
-Filename: "{app}\zaga_installer.exe"; Parameters: "unregister"; \
+; InitializeUninstall has already checked the code; passing it here means the
+; installer enforces it again rather than trusting the wizard.
+Filename: "{app}\zaga_installer.exe"; Parameters: "unregister --code ""{code:GetUninstallCode}"""; \
     Flags: runhidden waituntilterminated; RunOnceId: "ZagaUnregister"
+
+[UninstallDelete]
+; The device store lives outside {app}, so the package would otherwise leave it and a
+; reinstall would adopt the old identity. "unregister" already deletes it; this is the
+; backstop for when that binary is missing or did not run.
+Type: files; Name: "{commonappdata}\Zaga\state.bin"
+Type: dirifempty; Name: "{commonappdata}\Zaga"
 
 [Code]
 var
   EnrollPage: TInputQueryWizardPage;
+  UninstallCodeValue: String;
 
 procedure InitializeWizard;
 begin
   EnrollPage := CreateInputQueryPage(wpSelectTasks,
     'Enroll this device',
     'Connect the device to your billing portal (optional).',
-    'Enter the portal address and the one-time enrollment code from the portal. ' +
-    'Leave both blank to skip — you can enroll later from the Zaga app.');
+    'Only fill this in if the device is already registered on the portal and you ' +
+    'have its one-time enrollment code. Otherwise leave both blank: open the Zaga ' +
+    'app after setup, register the device with the details it shows, and enroll ' +
+    'from there.');
   EnrollPage.Add('Portal URL (e.g. http://192.168.1.20/zagatech):', False);
   EnrollPage.Add('Enrollment code:', False);
   EnrollPage.Values[0] := 'http://';
+end;
+
+function GetUninstallCode(Param: String): String;
+begin
+  Result := UninstallCodeValue;
+end;
+
+// Pascal Script has no InputQuery, and TInputQueryWizardPage belongs to the install
+// wizard, so the uninstall prompt is built by hand.
+function AskUninstallCode(var Code: String): Boolean;
+var
+  Form: TSetupForm;
+  Prompt: TNewStaticText;
+  Edit: TNewEdit;
+  OKButton, CancelButton: TNewButton;
+  W: Integer;
+begin
+  Result := False;
+  Form := CreateCustomForm(ScaleX(380), ScaleY(150), False, True);
+  try
+    Form.Caption := 'Zaga Device Lock';
+
+    Prompt := TNewStaticText.Create(Form);
+    Prompt.Parent := Form;
+    Prompt.Left := ScaleX(10);
+    Prompt.Top := ScaleY(10);
+    Prompt.Width := Form.ClientWidth - ScaleX(2 * 10);
+    Prompt.Height := ScaleY(34);
+    Prompt.AutoSize := False;
+    Prompt.WordWrap := True;
+    Prompt.Caption := 'Removal of this device is protected.' + #13#10 +
+                      'Contact support for the uninstall code. It is released once your' + #13#10 +
+                      'payment plan is complete.';
+
+    Edit := TNewEdit.Create(Form);
+    Edit.Parent := Form;
+    Edit.Left := ScaleX(10);
+    Edit.Top := ScaleY(54);
+    Edit.Width := Form.ClientWidth - ScaleX(2 * 10);
+    Edit.Height := ScaleY(23);
+
+    OKButton := TNewButton.Create(Form);
+    OKButton.Parent := Form;
+    OKButton.Caption := 'OK';
+    OKButton.Left := Form.ClientWidth - ScaleX(75 + 6 + 75 + 10);
+    OKButton.Top := Form.ClientHeight - ScaleY(23 + 10);
+    OKButton.Height := ScaleY(23);
+    OKButton.ModalResult := mrOk;
+    OKButton.Default := True;
+
+    CancelButton := TNewButton.Create(Form);
+    CancelButton.Parent := Form;
+    CancelButton.Caption := 'Cancel';
+    CancelButton.Left := Form.ClientWidth - ScaleX(75 + 10);
+    CancelButton.Top := Form.ClientHeight - ScaleY(23 + 10);
+    CancelButton.Height := ScaleY(23);
+    CancelButton.ModalResult := mrCancel;
+    CancelButton.Cancel := True;
+
+    W := Form.CalculateButtonWidth([OKButton.Caption, CancelButton.Caption]);
+    OKButton.Width := W;
+    CancelButton.Width := W;
+
+    Form.ActiveControl := Edit;
+
+    if Form.ShowModal() = mrOk then
+    begin
+      Code := Trim(Edit.Text);
+      Result := True;
+    end;
+  finally
+    Form.Free();
+  end;
+end;
+
+// Removal protection is armed at install, so uninstalling through Add/Remove
+// Programs has to ask for the code the same way the console verb does.
+function InitializeUninstall(): Boolean;
+var
+  Installer: String;
+  Code: String;
+  ResultCode: Integer;
+begin
+  Result := True;
+  Installer := ExpandConstant('{app}\zaga_installer.exe');
+  if not FileExists(Installer) then
+    Exit;
+
+  // Exit code 0 means protection is on; anything else means there is nothing to ask.
+  if not Exec(Installer, 'is-protected', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Exit;
+  if ResultCode <> 0 then
+    Exit;
+
+  Code := '';
+  repeat
+    if not AskUninstallCode(Code) then
+    begin
+      Result := False;
+      Exit;
+    end;
+
+    Exec(Installer, 'check-code --code "' + Code + '"', '', SW_HIDE,
+         ewWaitUntilTerminated, ResultCode);
+    if ResultCode <> 0 then
+      MsgBox('That code is not correct for this device.' + #13#10 + #13#10 +
+             'Contact support to be issued the uninstall code for this device.',
+             mbError, MB_OK);
+  until ResultCode = 0;
+
+  UninstallCodeValue := Code;
 end;
 
 function GetUrl(Param: String): String;

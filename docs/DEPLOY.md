@@ -1,9 +1,23 @@
 # Deploy — putting the client on a device
 
-The installer and provider are unsigned by default, so Windows shows an
-"unknown publisher" prompt (and SmartScreen on a downloaded copy). This guide
-covers building a self-contained release, signing it for your own fleet, and
-installing it on a device.
+This guide covers building a signed release and installing it on a device.
+
+## 0. Always build with `build-release.ps1`
+
+```powershell
+.\build-release.ps1
+```
+
+It builds Release, runs the tests, signs the three binaries, packages
+`dist\Zaga-Setup.exe`, signs the package, and refuses to ship if anything went in
+unsigned or was rebuilt after the signing pass.
+
+**Do not hand-run `cmake --build` and package the result.** Signing is not part of
+CMake, so a plain rebuild silently produces unsigned binaries that look identical
+and get quarantined on the customer's machine mid-install — surfacing as an error
+about a *missing file* rather than the real cause. This has already happened once.
+The sections below explain what the script does and why; the script is the
+interface.
 
 ## 1. Build a self-contained release
 
@@ -67,8 +81,44 @@ certutil -addstore -f Root ZagaCodeSigning.cer
 certutil -addstore -f TrustedPublisher ZagaCodeSigning.cer
 ```
 
-After this the installer shows "Zaga Device Lock" as the publisher and is not
-blocked. This step is a natural part of imaging or provisioning a fleet device.
+After this the installer shows "Zaga Device Lock" as the publisher. This step is a
+natural part of imaging or provisioning a fleet device, and it must happen **before**
+the installer runs.
+
+## 4b. When Defender blocks the install anyway
+
+> *"Operation did not complete successfully because the file contains a virus or
+> potentially unwanted software"* — sometimes followed by *"The system cannot find
+> the file specified"*, which is the same problem one step later: Defender
+> quarantined the file mid-copy, so the installer's next read finds nothing.
+
+Trusting the certificate does **not** prevent this. It fixes *unknown publisher*,
+which is a trust question. An antivirus detection is a reputation question, and a
+self-signed certificate carries no reputation at all — no certificate authority
+vouches for it, so it earns nothing with Defender or SmartScreen. A credential
+provider is close to a worst case for antivirus heuristics: it hooks the login
+screen, writes DPAPI blobs, and registers COM in winlogon, which is exactly the
+shape of credential-stealing malware.
+
+In rough order of how durable they are:
+
+1. **Buy a real code-signing certificate** (OV, or EV for immediate SmartScreen
+   reputation) from a public CA. This is the only fix that generalises to machines
+   you do not control. For software that ships a credential provider to customer
+   devices, treat it as a cost of doing business, not an optimisation.
+2. **Report the false positive** to Microsoft at
+   <https://www.microsoft.com/en-us/wdsi/filesubmission>. Free, usually resolved in
+   a few days. It allow-lists by file hash, so **every rebuild needs resubmitting** —
+   useful for a fixed release, useless during active development.
+3. **Add a Defender exclusion during provisioning**, before installing:
+   `Add-MpPreference -ExclusionPath "C:\Program Files\Zaga"`. Defensible on a fleet
+   you manage and have physical access to. Never ask a customer to do this, and note
+   that Tamper Protection can block it.
+
+Detection is per-machine: it depends on definition version, cloud verdict, whether
+PUA protection is set to Block (the Windows 11 default) or Audit, and whether the
+file arrived with a download tag. A machine that installs cleanly proves nothing
+about the next one — test on a device configured like the fleet, not like a dev box.
 
 ## 5. Install and provision
 

@@ -16,7 +16,33 @@ public:
     static std::string portalUrl();
     static void setPortalUrl(const std::string& url);
 
+    // The device's own account number, minted here so it exists before any portal
+    // knows about this machine: an operator reads it out of the app and registers the
+    // device with it. Not a secret — the customer reads it off the lock screen — so
+    // unlike the uninstall code it is stored in the clear.
+    //
+    // The random space is large enough that unco-ordinated devices do not collide;
+    // see generateAccountNumber. ensureAccountNumber keeps any number already issued.
+    static std::string ensureAccountNumber();
+    static std::string accountNumber();
+    static void setAccountNumber(const std::string& accountNumber);
+
+    // Why the last privileged action failed, in the portal's own words. The app has to
+    // launch the installer through ShellExecute to get a UAC prompt, and that cannot
+    // capture output — so without somewhere to leave the reason, every failure looks
+    // the same to the person reading the screen.
+    static void setLastError(const std::string& message);
+    static std::string lastError();
+    static void clearLastError();
+
     static bool uninstallProtected();
+
+    // The removal-authorization code is generated here, on the device, so it is
+    // unique to this machine and exists before the device is known to any portal.
+    // An operator reads it out of the app and records it against the device on the
+    // portal; storing it is what arms protection.
+    static std::string ensureUninstallCode();
+    static std::string uninstallCode();
 
     static void setUninstallCode(const std::string& code);
     static bool checkUninstallCode(const std::string& code);

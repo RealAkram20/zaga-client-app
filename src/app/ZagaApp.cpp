@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "DeviceConfig.h"
+#include "HardwareInfo.h"
 #include "LocalStore.h"
 #include "LockGate.h"
 #include "PortalClient.h"
@@ -76,6 +77,11 @@ const COLORREF COL_DANGER_TXT= RGB(0xF0, 0x8A, 0x8A);
 enum ActionId {
     ACT_NONE = 0,
     ACT_COPY_ACCOUNT,
+    ACT_COPY_NAME,
+    ACT_COPY_MODEL,
+    ACT_COPY_SERIAL,
+    ACT_COPY_MANUFACTURER,
+    ACT_COPY_UNINSTALL,
     ACT_TOGGLE_LOCK,
     ACT_CHECKIN,
     ACT_FETCH,
@@ -86,7 +92,7 @@ enum ActionId {
     ACT_REFRESH,
 };
 
-enum ButtonStyle { STYLE_PRIMARY, STYLE_NORMAL, STYLE_DANGER, STYLE_GHOST };
+enum ButtonStyle { STYLE_PRIMARY, STYLE_NORMAL, STYLE_DANGER, STYLE_GHOST, STYLE_ICON };
 
 struct Button {
     RECT rc;
@@ -103,7 +109,8 @@ struct AppModel {
     bool lockEnabled = false;
     bool removalProtected = false;
     bool locked = false;
-    std::wstring account, name, model, serial, statusText, deadlineText;
+    std::wstring account, name, model, serial, manufacturer, statusText, deadlineText;
+    std::wstring uninstallCode;
     std::wstring portalUrl;
     std::wstring uninstallDeviceToken; // whether we have a token (not shown)
     bool enrolled = false;
@@ -177,14 +184,31 @@ void refreshModel() {
     GateInfo info = LockGate::describe();
     g_model.provisioned = info.provisioned;
     g_model.locked = info.locked;
-    g_model.account = widen(info.accountNumber);
-    g_model.name = widen(info.name);
-    g_model.model = widen(info.model);
-    g_model.serial = widen(info.serial);
+    // This device's own number, minted at install so it exists before any portal knows
+    // the machine. The store's copy is the fallback for devices enrolled before the
+    // number moved on-device.
+    std::string account = DeviceConfig::accountNumber();
+    g_model.account = widen(!account.empty() ? account : info.accountNumber);
+
+    // The store's hardware fields are the portal's copy — whatever an operator
+    // typed into the record — so this machine's own firmware wins, exactly as the
+    // portal treats it as authoritative at enrollment. The stored value is only a
+    // fallback for machines whose SMBIOS will not say.
+    HardwareInfo hardware = Hardware::detect();
+    g_model.model = widen(!hardware.model.empty() ? hardware.model : info.model);
+    g_model.serial = widen(!hardware.serial.empty() ? hardware.serial : info.serial);
+    g_model.manufacturer = widen(hardware.manufacturer);
+
+    // This machine's own device name, for the same reason as the fields above: a
+    // label typed into the portal describes what someone meant to register, not what
+    // this computer actually is. The portal's label is only a fallback.
+    g_model.name = widen(!hardware.hostname.empty() ? hardware.hostname : info.name);
+
     g_model.statusText = widen(info.statusText);
     g_model.deadlineText = widen(info.deadlineText);
     g_model.lockEnabled = DeviceConfig::lockEnabled();
     g_model.removalProtected = DeviceConfig::uninstallProtected();
+    g_model.uninstallCode = widen(DeviceConfig::uninstallCode());
     g_model.portalUrl = widen(DeviceConfig::portalUrl());
 
     StoredDevice device;
@@ -261,7 +285,19 @@ void doPrivileged(const std::wstring& params, const wchar_t* okMsg,
     if (code == 0) {
         g_model.lastMessage = okMsg;
     } else if (code != static_cast<DWORD>(-1)) {
-        g_model.lastMessage = failMsg;
+        // Prefer what the portal actually said. A generic "check the URL and code" is
+        // worse than nothing when the real answer is something else entirely — it
+        // sends whoever is standing at the machine looking in the wrong place.
+        std::string reason = DeviceConfig::lastError();
+        if (reason.empty()) {
+            g_model.lastMessage = failMsg;
+        } else {
+            // The footer clips to one line, and these messages say what to go and do,
+            // so they get a dialog the reader cannot miss or half-read.
+            g_model.lastMessage = failMsg;
+            MessageBoxW(g_wnd, widen(reason).c_str(), L"Zaga Device Lock",
+                        MB_ICONWARNING | MB_OK);
+        }
     }
     refreshModel();
     startCheckIn();
@@ -512,7 +548,9 @@ void onUninstall() {
     std::wstring params = L"uninstall";
     if (g_model.removalProtected) {
         if (!inputBox(g_wnd, L"Uninstall Zaga",
-                      L"Removal is protected. Enter the uninstall code:", L"", false, code) ||
+                      L"Removal of this device is protected.\n\nContact support for the "
+                      L"uninstall code. It is released once your payment plan is complete.",
+                      L"", false, code) ||
             code.empty()) {
             return;
         }
@@ -548,15 +586,21 @@ void onOpenPortal() {
     ShellExecuteW(g_wnd, L"open", g_model.portalUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+void copyField(const std::wstring& value, const wchar_t* what) {
+    if (value.empty()) return;
+    copyToClipboard(value);
+    g_model.lastMessage = std::wstring(what) + L" copied.";
+    InvalidateRect(g_wnd, nullptr, FALSE);
+}
+
 void dispatch(int action) {
     switch (action) {
-        case ACT_COPY_ACCOUNT:
-            if (!g_model.account.empty()) {
-                copyToClipboard(g_model.account);
-                g_model.lastMessage = L"Account number copied.";
-                InvalidateRect(g_wnd, nullptr, FALSE);
-            }
-            break;
+        case ACT_COPY_ACCOUNT:      copyField(g_model.account, L"Account number"); break;
+        case ACT_COPY_NAME:         copyField(g_model.name, L"Device name"); break;
+        case ACT_COPY_MODEL:        copyField(g_model.model, L"Model"); break;
+        case ACT_COPY_SERIAL:       copyField(g_model.serial, L"Serial"); break;
+        case ACT_COPY_MANUFACTURER: copyField(g_model.manufacturer, L"Manufacturer"); break;
+        case ACT_COPY_UNINSTALL:    copyField(g_model.uninstallCode, L"Uninstall code"); break;
         case ACT_TOGGLE_LOCK: onToggleLock(); break;
         case ACT_CHECKIN:     startCheckIn(); break;
         case ACT_FETCH:       onFetch(); break;
@@ -595,14 +639,25 @@ void text(HDC dc, const std::wstring& s, RECT r, HFONT font, COLORREF color, UIN
     SelectObject(dc, of);
 }
 
-// A labelled field: small caps label over a value.
-int field(HDC dc, int x, int y, int w, const wchar_t* label, const std::wstring& value) {
-    RECT lr{x, y, x + w, y + 16};
-    text(dc, label, lr, g_fLabel, COL_FAINT, DT_LEFT | DT_SINGLELINE);
-    RECT vr{x, y + 16, x + w, y + 40};
-    std::wstring v = value.empty() ? L"—" : value;
-    text(dc, v, vr, g_fValue, COL_TEXT, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-    return y + 46;
+// The two-sheets "copy" glyph, centred in r. The front sheet is filled with the
+// button's own colour so it reads as overlapping rather than as a grid.
+void copyGlyph(HDC dc, RECT r, COLORREF color, COLORREF fill) {
+    int cx = (r.left + r.right) / 2;
+    int cy = (r.top + r.bottom) / 2;
+
+    HPEN pen = CreatePen(PS_SOLID, 1, color);
+    HBRUSH front = CreateSolidBrush(fill);
+    HGDIOBJ op = SelectObject(dc, pen);
+    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+
+    RoundRect(dc, cx - 6, cy - 7, cx + 2, cy + 4, 3, 3);   // back sheet
+    SelectObject(dc, front);
+    RoundRect(dc, cx - 2, cy - 3, cx + 6, cy + 8, 3, 3);   // front sheet
+
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(front);
+    DeleteObject(pen);
 }
 
 void statusColors(COLORREF& dot, std::wstring& label) {
@@ -630,15 +685,49 @@ void button(HDC dc, RECT r, int action, const std::wstring& label, int style, bo
         case STYLE_GHOST:
             fill = hot ? COL_BTN_HOT : COL_INSET; edge = COL_CARD_EDGE; fg = COL_ACCENT;
             break;
+        case STYLE_ICON:
+            // Reads as part of the card until hovered, so a copy affordance on
+            // every field does not compete with the real buttons.
+            fill = hot ? COL_BTN_HOT : COL_CARD;
+            edge = hot ? COL_CARD_EDGE : COL_CARD;
+            fg = hot ? COL_ACCENT : COL_FAINT;
+            break;
         default:
             fill = hot ? COL_BTN_HOT : COL_BTN; edge = COL_CARD_EDGE; fg = COL_TEXT;
             break;
     }
     if (!enabled) { fill = COL_INSET; edge = COL_CARD_EDGE; fg = COL_FAINT; }
 
-    fillRound(dc, r, fill, edge, 10);
+    fillRound(dc, r, fill, edge, style == STYLE_ICON ? 7 : 10);
+
+    if (style == STYLE_ICON) {
+        copyGlyph(dc, r, fg, fill);
+        return;
+    }
+
     RECT tr = r;
     text(dc, label, tr, g_fBtn, fg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+// A labelled field: small caps label over a value, with a copy button when the
+// value is worth copying and there is one to copy.
+int field(HDC dc, int x, int y, int w, const wchar_t* label, const std::wstring& value,
+          int copyAction = ACT_NONE) {
+    RECT lr{x, y, x + w, y + 16};
+    text(dc, label, lr, g_fLabel, COL_FAINT, DT_LEFT | DT_SINGLELINE);
+
+    bool copyable = copyAction != ACT_NONE && !value.empty();
+    int valueRight = x + w - (copyable ? 30 : 0);
+
+    RECT vr{x, y + 16, valueRight, y + 40};
+    std::wstring v = value.empty() ? L"—" : value;
+    text(dc, v, vr, g_fValue, COL_TEXT, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    if (copyable) {
+        RECT cb{x + w - 26, y + 14, x + w, y + 40};
+        button(dc, cb, copyAction, L"", STYLE_ICON, true);
+    }
+    return y + 46;
 }
 
 // ---- paint -----------------------------------------------------------------
@@ -701,39 +790,59 @@ void paint(HWND hwnd, HDC target, const RECT& client) {
     // --- device card ---
     {
         int cardTop = y;
-        RECT card{M, cardTop, M + W, cardTop + 226};
+        // The pre-enrollment card carries an extra hint line and the uninstall code
+        // row, so it needs the room the enrolled one does not.
+        RECT card{M, cardTop, M + W, cardTop + (g_model.provisioned ? 240 : 262)};
         fillRound(dc, card, COL_CARD, COL_CARD_EDGE, 14);
         int cx = M + 20;
         int cw = W - 40;
         int cy = cardTop + 18;
 
-        if (!g_model.provisioned) {
-            RECT t{cx, cy, cx + cw, cy + 24};
-            text(dc, L"This device is not enrolled yet.", t, g_fValue, COL_TEXT,
-                 DT_LEFT | DT_SINGLELINE);
-            RECT s{cx, cy + 30, cx + cw, cy + 74};
-            text(dc, L"Click “Enroll device” below and enter the portal URL and the "
-                     L"one-time code from the billing portal.",
-                 s, g_fValue, COL_MUTED, DT_LEFT | DT_WORDBREAK);
-        } else {
-            // account label + big number + copy
-            RECT al{cx, cy, cx + cw, cy + 16};
-            text(dc, L"ACCOUNT NUMBER", al, g_fLabel, COL_FAINT, DT_LEFT | DT_SINGLELINE);
-            RECT an{cx, cy + 16, cx + cw - 80, cy + 56};
-            text(dc, g_model.account, an, g_fH1, COL_TEXT, DT_LEFT | DT_SINGLELINE);
-            RECT cp{M + W - 92, cy + 20, M + W - 20, cy + 48};
-            button(dc, cp, ACT_COPY_ACCOUNT, L"Copy", STYLE_GHOST, true);
+        // The account number leads whether or not the device has enrolled: the machine
+        // mints it at install, and registering the device on the portal with it is
+        // what this card exists to make possible.
+        RECT al{cx, cy, cx + cw, cy + 16};
+        text(dc, L"ACCOUNT NUMBER", al, g_fLabel, COL_FAINT, DT_LEFT | DT_SINGLELINE);
+        RECT an{cx, cy + 16, cx + cw - 80, cy + 56};
+        text(dc, g_model.account, an, g_fH1, COL_TEXT, DT_LEFT | DT_SINGLELINE);
+        RECT cp{M + W - 92, cy + 20, M + W - 20, cy + 48};
+        button(dc, cp, ACT_COPY_ACCOUNT, L"Copy", STYLE_GHOST, !g_model.account.empty());
 
-            int gy = cy + 66;
-            int colw = (cw - 20) / 2;
-            int leftY = field(dc, cx, gy, colw, L"DEVICE", g_model.name);
-            field(dc, cx + colw + 20, gy, colw, L"MODEL", g_model.model);
-            int y2 = leftY;
-            int leftY2 = field(dc, cx, y2, colw, L"SERIAL", g_model.serial);
-            const wchar_t* dlabel = g_model.locked ? L"LOCKED SINCE" : L"RENEWS / DUE";
-            field(dc, cx + colw + 20, y2, colw, dlabel, g_model.deadlineText);
-            (void)leftY2;
+        int gy = cy + 66;
+        if (!g_model.provisioned) {
+            // Before enrollment this card is the registration worksheet: these are the
+            // values that go into the portal to create the device record, which is what
+            // yields the enrollment code.
+            RECT s{cx, gy, cx + cw, gy + 34};
+            text(dc, L"Not enrolled. Register the device on the portal with these "
+                     L"details, then “Enroll device” with the code it gives you.",
+                 s, g_fLabel, COL_MUTED, DT_LEFT | DT_WORDBREAK);
+            gy += 40;
         }
+
+        int colw = (cw - 20) / 2;
+        int rx = cx + colw + 20;
+
+        int y2 = field(dc, cx, gy, colw, L"DEVICE", g_model.name, ACT_COPY_NAME);
+        field(dc, rx, gy, colw, L"MODEL", g_model.model, ACT_COPY_MODEL);
+
+        int y3 = field(dc, cx, y2, colw, L"SERIAL", g_model.serial, ACT_COPY_SERIAL);
+        field(dc, rx, y2, colw, L"MANUFACTURER", g_model.manufacturer,
+              ACT_COPY_MANUFACTURER);
+
+        // The uninstall code is shown only until the device enrols, which is the
+        // window where an operator needs to read it off to register the device. Once
+        // financed, leaving it on screen would hand the customer the one secret that
+        // defeats removal protection; from then on it lives on the portal.
+        const wchar_t* dlabel = g_model.locked ? L"LOCKED SINCE" : L"RENEWS / DUE";
+        if (g_model.provisioned) {
+            field(dc, cx, y3, colw, dlabel, g_model.deadlineText);
+        } else {
+            field(dc, cx, y3, colw, L"UNINSTALL CODE", g_model.uninstallCode,
+                  ACT_COPY_UNINSTALL);
+            field(dc, rx, y3, colw, dlabel, g_model.deadlineText);
+        }
+
         y = card.bottom + 14;
     }
 
@@ -743,11 +852,24 @@ void paint(HWND hwnd, HDC target, const RECT& client) {
         fillRound(dc, card, COL_CARD, COL_CARD_EDGE, 14);
         RECT l{M + 20, y + 12, M + W - 160, y + 30};
         text(dc, L"Lock enforcement", l, g_fValue, COL_TEXT, DT_LEFT | DT_SINGLELINE);
-        RECT s{M + 20, y + 32, M + W - 160, y + 52};
-        std::wstring sub = g_model.lockEnabled
-            ? L"Armed — the login screen is gated when overdue."
-            : L"Dormant — nothing is gated at the login screen.";
-        if (g_model.removalProtected) sub += L"  Removal protected.";
+        RECT s{M + 20, y + 32, M + W - 150, y + 52};
+        // Both clauses are always shown, so the longest pairing still has to fit the
+        // line. The armed/dormant word is left to the badge above rather than
+        // repeated here, which is what buys the room.
+        //
+        // "Locked now" matters most: a credential provider only shows at the login
+        // screen, so an armed, locked device looks identical to an unlocked one until
+        // someone signs out. Saying so stops that reading as the lock not working.
+        std::wstring sub;
+        if (g_model.lockEnabled && g_model.locked) {
+            sub = L"LOCKED — sign out to see it.";
+        } else if (g_model.lockEnabled) {
+            sub = L"Login gated when overdue.";
+        } else {
+            sub = L"Login not gated.";
+        }
+        sub += g_model.removalProtected ? L"  ·  Removal protected."
+                                        : L"  ·  Removal unprotected.";
         text(dc, sub, s, g_fLabel, COL_MUTED, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         RECT b{M + W - 140, y + 17, M + W - 20, y + 49};
         button(dc, b, ACT_TOGGLE_LOCK, g_model.lockEnabled ? L"Disable" : L"Enable",
@@ -934,7 +1056,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_ZAGA));
     RegisterClassW(&wc);
 
-    const int cw = 560, ch = 760;
+    const int cw = 560, ch = 774;
     RECT r{0, 0, cw, ch};
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRect(&r, style, FALSE);

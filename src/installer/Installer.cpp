@@ -2,6 +2,7 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <objbase.h>
+#include <wtsapi32.h>
 
 #include <cstdio>
 #include <iostream>
@@ -135,8 +136,11 @@ DWORD runProcess(const std::wstring& commandLine) {
 }
 
 bool registerHeartbeatTask(const std::wstring& exePath) {
+    // Every 15 minutes rather than hourly: this task is not only a check-in, it is what
+    // enforces the lock on an already-open session. An hour of free use after going
+    // overdue is an hour too many, and the run is cheap when nothing has changed.
     std::wstring command = systemExe(L"schtasks.exe") +
-        L" /Create /F /RU SYSTEM /SC HOURLY" +
+        L" /Create /F /RU SYSTEM /SC MINUTE /MO 15" +
         L" /TN \"" + TASK_NAME + L"\"" +
         L" /TR \"\\\"" + exePath + L"\\\" heartbeat\"";
     return runProcess(command) == 0;
@@ -254,6 +258,58 @@ std::string argValue(int argc, wchar_t** argv, const wchar_t* name) {
     return std::string();
 }
 
+// A switch that carries no value of its own, e.g. --force.
+bool hasFlag(int argc, wchar_t** argv, const wchar_t* name) {
+    for (int i = 2; i < argc; ++i) {
+        if (_wcsicmp(argv[i], name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Removes the device store, which lives in ProgramData rather than the install
+// folder and so survives deleting program files. Leaving it behind means a reinstall
+// silently adopts the old account number, secret, token and counter — the machine
+// comes back answering to a portal record that may no longer exist, instead of
+// registering as the new device it now is.
+//
+// Safe to do here because every route into an uninstall is gated on the uninstall
+// code: nothing reaches this without authorization.
+void removeDeviceStore() {
+    std::wstring store = LocalStore::defaultPath();
+
+    if (!DeleteFileW(store.c_str()) &&
+        GetFileAttributesW(store.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        MoveFileExW(store.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+    }
+
+    // Take the folder too, but only if it is empty — RemoveDirectory fails harmlessly
+    // when anything else lives there.
+    size_t slash = store.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) {
+        RemoveDirectoryW(store.substr(0, slash).c_str());
+    }
+}
+
+// Mints this device's account number, or adopts the one it already answers to. A
+// machine that is already enrolled has a number its portal record was built around,
+// and the customer pays against that; minting a fresh one on upgrade would put a
+// number on the lock screen that the portal has never heard of.
+std::string adoptOrMintAccountNumber() {
+    if (!DeviceConfig::accountNumber().empty()) {
+        return DeviceConfig::accountNumber();
+    }
+
+    StoredDevice device;
+    if (LocalStore::load(LocalStore::defaultPath(), device) && !device.accountNumber.empty()) {
+        DeviceConfig::setAccountNumber(device.accountNumber);
+        return device.accountNumber;
+    }
+
+    return DeviceConfig::ensureAccountNumber();
+}
+
 int doInstall() {
     std::wstring source = exeDirectory() + L"\\" + DLL_NAME;
     if (GetFileAttributesW(source.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -291,7 +347,21 @@ int doInstall() {
 
     DeviceConfig::setLockEnabled(false);
 
-    std::printf("Installed. The lock is OFF (dormant) and removal is not protected.\n");
+    // Minted here, before the device is known to any portal, so the technician can
+    // read it out and record it against the device when registering. Storing it is
+    // what arms protection, so removal needs the code from this point on.
+    std::string uninstallCode = DeviceConfig::ensureUninstallCode();
+    std::string accountNumber = adoptOrMintAccountNumber();
+
+    std::printf("Installed. The lock is OFF (dormant) until the device enrolls.\n");
+    std::printf("Account number:      %s\n", accountNumber.c_str());
+    if (uninstallCode.empty()) {
+        std::printf("WARNING: no uninstall code could be stored, so removal is NOT protected.\n");
+    } else {
+        std::printf("Uninstall code:      %s\n", uninstallCode.c_str());
+        std::printf("Register the device on the portal with these. Keep the uninstall code:\n");
+        std::printf("it is required to remove the software.\n");
+    }
     std::printf("Management app: %s\n",
                 haveApp ? "installed (Start menu > Zaga Device Lock)"
                         : "not shipped next to the installer (skipped)");
@@ -318,25 +388,88 @@ int doRegister() {
     bool scheduled = registerHeartbeatTask(selfPath());
     DeviceConfig::setLockEnabled(false);
 
-    std::printf("Registered. The lock is dormant; hourly check-in %s.\n",
+    // The packaged wizard runs this verb rather than "install", so the code has to
+    // be minted here too or a device set up from Zaga-Setup.exe would be removable
+    // by anyone. The technician reads it out of the app to register the device.
+    std::string uninstallCode = DeviceConfig::ensureUninstallCode();
+    std::string accountNumber = adoptOrMintAccountNumber();
+
+    std::printf("Registered. The lock is dormant until enrollment; hourly check-in %s.\n",
                 scheduled ? "scheduled" : "could not be scheduled");
+    std::printf("Account number:      %s\n", accountNumber.c_str());
+    if (uninstallCode.empty()) {
+        std::printf("WARNING: no uninstall code could be stored, so removal is NOT protected.\n");
+    } else {
+        std::printf("Uninstall code:      %s\n", uninstallCode.c_str());
+    }
     return 0;
 }
 
 // Undo doRegister for a packaged uninstall. The package removes the files.
-int doUnregister() {
-    removeHeartbeatTask();
-    callDllEntry(exeDirectory() + L"\\" + DLL_NAME, "DllUnregisterServer");
-    DeviceConfig::removeAll();
-    std::printf("Unregistered. The provider is removed and settings are cleared.\n");
-    return 0;
-}
-
-int doUninstall(int argc, wchar_t** argv) {
+//
+// This honors removal protection exactly as the console "uninstall" verb does: the
+// packaged wizard is the route a customer would actually take, so leaving it
+// ungated would make the lock removable from Add/Remove Programs.
+int doUnregister(int argc, wchar_t** argv) {
     if (DeviceConfig::uninstallProtected()) {
         std::string code = argValue(argc, argv, L"--code");
         if (code.empty() || !DeviceConfig::checkUninstallCode(code)) {
-            std::printf("Removal is protected. Pass the correct --code to uninstall.\n");
+            std::printf("Removal is protected. Pass the correct --code to unregister.\n");
+            return 1;
+        }
+    }
+
+    removeHeartbeatTask();
+    callDllEntry(exeDirectory() + L"\\" + DLL_NAME, "DllUnregisterServer");
+
+    // The package owns its own Add/Remove entry, but a machine that was ever set up
+    // with the console "install" verb also has ours, pointing at zaga_installer.exe.
+    // Removing the program files without this leaves that entry behind aimed at a
+    // deleted exe, so Windows reports it cannot find the file when someone clicks
+    // Uninstall. Our key is distinct from the package's ({AppId}_is1), so clearing it
+    // here cannot disturb the wizard's own entry.
+    unregisterAddRemove();
+
+    removeDeviceStore();
+    DeviceConfig::removeAll();
+    std::printf("Unregistered. The provider is removed and all device data is cleared.\n");
+    std::printf("A reinstall will register as a new device.\n");
+    return 0;
+}
+
+// Exit 0 when removal protection is on, so the setup wizard can tell whether it
+// needs to ask for a code before uninstalling.
+int doIsProtected() {
+    bool protectedNow = DeviceConfig::uninstallProtected();
+    std::printf("Removal protected: %s\n", protectedNow ? "yes" : "no");
+    return protectedNow ? 0 : 1;
+}
+
+// Exit 0 when the supplied code would authorise a removal. Reads no machine state
+// beyond the stored code, so the wizard can call it before elevating anything.
+int doCheckCode(int argc, wchar_t** argv) {
+    if (!DeviceConfig::uninstallProtected()) {
+        return 0;
+    }
+    return DeviceConfig::checkUninstallCode(argValue(argc, argv, L"--code")) ? 0 : 1;
+}
+
+// `interactive` is set only for the double-clicked/Add-Remove route, which has a
+// console to ask in. It never weakens the check — an unprotected device is still
+// unprotected, and a wrong code still refuses — it only offers somewhere to type the
+// code rather than dead-ending on "pass --code".
+int doUninstall(int argc, wchar_t** argv, bool interactive = false) {
+    if (DeviceConfig::uninstallProtected()) {
+        std::string code = argValue(argc, argv, L"--code");
+        if (code.empty() && interactive) {
+            std::printf("Removal of this device is protected.\n"
+                        "Contact support for the uninstall code. It is released once the\n"
+                        "payment plan is complete.\n\n");
+            code = promptLine("Uninstall code: ");
+        }
+        if (code.empty() || !DeviceConfig::checkUninstallCode(code)) {
+            std::printf("That code is not correct for this device. Contact support to be\n"
+                        "issued the uninstall code.\n");
             return 1;
         }
     }
@@ -361,9 +494,11 @@ int doUninstall(int argc, wchar_t** argv) {
     if (!RemoveDirectoryW(installDirectory().c_str())) {
         MoveFileExW(installDirectory().c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
     }
+    removeDeviceStore();
     DeviceConfig::removeAll();
 
-    std::printf("Uninstalled. The provider is unregistered and settings are cleared.\n");
+    std::printf("Uninstalled. The provider is unregistered and all device data is cleared.\n");
+    std::printf("A reinstall will register as a new device.\n");
     return 0;
 }
 
@@ -410,9 +545,14 @@ int enrollWith(const std::string& code, const std::string& portal) {
     DeviceConfig::setPortalUrl(portal);
     EnrollResult result = PortalClient(portal).enroll(code, AGENT_VERSION);
     if (!result.ok) {
+        // Left where the app can read it: the portal's reason is the only thing that
+        // tells anyone what to actually do, and it cannot travel back through the UAC
+        // launch any other way.
+        DeviceConfig::setLastError(result.message);
         std::printf("Enrollment failed: %s\n", result.message.c_str());
         return 1;
     }
+    DeviceConfig::clearLastError();
 
     StoredDevice device;
     device.accountNumber = result.accountNumber;
@@ -427,13 +567,70 @@ int enrollWith(const std::string& code, const std::string& portal) {
         return 1;
     }
 
+    // An enrolled device must not be removable without authorization. Normally the
+    // code was minted at install; this covers machines installed before codes were
+    // generated, and any install where the write did not land.
+    std::string uninstallCode = DeviceConfig::ensureUninstallCode();
+
+    // The portal is the billing authority once a record exists: the customer pays
+    // against the number it holds. Normally that is the number this device minted and
+    // an operator registered, and this is a no-op; when they differ — a typo at
+    // registration, or a device enrolled against an older record — the machine follows
+    // the portal rather than showing a number nobody can pay against.
+    if (!result.accountNumber.empty() &&
+        result.accountNumber != DeviceConfig::accountNumber()) {
+        DeviceConfig::setAccountNumber(result.accountNumber);
+    }
+
+    // Enrolling arms the lock and leaves the device locked: it has no deadline yet, and
+    // the gate reads "no deadline" as overdue. That is deliberate — the device is
+    // financed but nothing has been paid into it, so it stays shut until the first
+    // unlock token is entered, and the term is counted from that moment rather than
+    // from an enrollment date nobody was watching.
+    //
+    // This is only safe because the portal refuses to enroll a device that is not on a
+    // plan, so a token always exists for the operator to type in.
+    DeviceConfig::setLockEnabled(true);
+
     std::printf("Enrolled %s from the portal. The device store is written.\n",
                 result.accountNumber.c_str());
+    std::printf("Lock enforcement:    ARMED. This device is LOCKED until an unlock\n");
+    std::printf("                     token is entered; the term starts from then.\n");
+    if (uninstallCode.empty()) {
+        std::printf("WARNING: no uninstall code could be stored, so removal is NOT protected.\n");
+    } else {
+        std::printf("Uninstall code:      %s\n", uninstallCode.c_str());
+    }
     return 0;
 }
 
 int doEnroll(int argc, wchar_t** argv) {
     return enrollWith(argValue(argc, argv, L"--code"), resolvePortalUrl(argc, argv));
+}
+
+// Drops whoever is signed in back to the logon screen, where the credential provider
+// gates them.
+//
+// This exists because the provider only ever guards the *door*: it is consulted when
+// someone tries to log in, and has no say over a session that is already open. Without
+// this, a customer who stops paying and simply never signs out is never locked out at
+// all — the device would go overdue and they would keep using it indefinitely.
+//
+// Disconnecting rather than logging off deliberately: the session and the customer's
+// unsaved work stay intact behind the logon screen, so an overdue device costs them
+// access, not their data.
+bool disconnectActiveSession() {
+    DWORD session = WTSGetActiveConsoleSessionId();
+    if (session == 0xFFFFFFFF) {
+        return false;   // no console session attached; nobody to disconnect
+    }
+
+    // Session 0 is the isolated services session — nobody is signed in there.
+    if (session == 0) {
+        return false;
+    }
+
+    return WTSDisconnectSession(WTS_CURRENT_SERVER_HANDLE, session, FALSE) != FALSE;
 }
 
 int doHeartbeat() {
@@ -448,6 +645,22 @@ int doHeartbeat() {
     GateInfo info = LockGate::describe();
     bool ok = PortalClient(portal).heartbeat(device.deviceToken, info.statusText, AGENT_VERSION);
     std::printf(ok ? "Checked in with the portal.\n" : "Could not reach the portal.\n");
+
+    // Enforce the lock on a session that is already open. Judged from the local store,
+    // never from the check-in above, so a device that has gone overdue still locks with
+    // the network unplugged — pulling the cable must not be a way to keep using it.
+    if (info.locked) {
+        std::printf("Device is locked (%s). Returning to the logon screen.\n",
+                    info.statusText.c_str());
+        if (disconnectActiveSession()) {
+            std::printf("Signed-in session disconnected.\n");
+        }
+    }
+
+    // Deliberately does not pull or apply a token. A newly enrolled device is locked
+    // and stays locked until someone enters the first unlock token, which is what
+    // starts its term. Applying one here would open the device on its own, before
+    // anyone had chosen to start the clock.
     return ok ? 0 : 1;
 }
 
@@ -482,7 +695,24 @@ int doFetchToken() {
     std::string message;
     VerifyResult applied = LockGate::applyCode(result.token, message);
     std::printf("%s\n", message.c_str());
-    return applied == VerifyResult::Accepted ? 0 : 1;
+
+    if (applied != VerifyResult::Accepted) {
+        return 1;
+    }
+
+    // Enrolling arms the device, but only if the portal already had a token to give —
+    // which it does not until the device is put on a plan. When the plan comes second,
+    // this is the moment the device first has a deadline, so it is the moment to arm.
+    // Nothing to do if an operator has deliberately disabled enforcement and the
+    // device is already armed.
+    if (!DeviceConfig::lockEnabled()) {
+        DeviceConfig::setLockEnabled(true);
+        GateInfo info = LockGate::describe();
+        std::printf("Lock enforcement:    ARMED (gates login after %s).\n",
+                    info.deadlineText.empty() ? "the due date" : info.deadlineText.c_str());
+    }
+
+    return 0;
 }
 
 int doProtect(int argc, wchar_t** argv) {
@@ -513,6 +743,10 @@ int doStatus() {
     GateInfo info = LockGate::describe();
     std::printf("Lock enabled:        %s\n", DeviceConfig::lockEnabled() ? "yes" : "no");
     std::printf("Removal protected:   %s\n", DeviceConfig::uninstallProtected() ? "yes" : "no");
+    std::string uninstallCode = DeviceConfig::uninstallCode();
+    if (!uninstallCode.empty()) {
+        std::printf("Uninstall code:      %s\n", uninstallCode.c_str());
+    }
     std::printf("Provisioned:         %s\n", info.provisioned ? "yes" : "no");
     if (info.provisioned) {
         std::printf("Account:             %s\n", info.accountNumber.c_str());
@@ -558,7 +792,10 @@ void usage() {
         "  (double-click)                  guided setup with a UAC prompt\n"
         "  install                         copy and register the provider (dormant)\n"
         "  uninstall [--code <c>]          unregister and remove\n"
-        "  register | unregister           provider reg only (used by the setup package)\n"
+        "  register                        provider reg only (used by the setup package)\n"
+        "  unregister [--code <c>]         undo register (used by the setup package)\n"
+        "  is-protected                    exit 0 when removal protection is on\n"
+        "  check-code --code <c>           exit 0 when the code would authorise removal\n"
         "  enroll --code <c> --url <u>     provision from the portal over the network\n"
         "  provision --account --secret    write the device store from a bundle offline\n"
         "  heartbeat                       check in with the portal\n"
@@ -566,7 +803,7 @@ void usage() {
         "  apply-code --code <c>           apply a typed unlock code through the verifier\n"
         "  schedule | unschedule           add or remove the hourly check-in task\n"
         "  set-url --url <u>               set the portal base url\n"
-        "  enable | disable                turn the lock on or off\n"
+        "  enable [--force] | disable      turn the lock on or off\n"
         "  protect --code <c>              require a code to uninstall\n"
         "  unprotect --code <c>            remove uninstall protection\n"
         "  status                          show the current state\n"
@@ -600,7 +837,7 @@ int wmain(int argc, wchar_t** argv) {
             relaunchElevated(L"uninstall-ui");
             return 0;
         }
-        int result = doUninstall(argc, argv);
+        int result = doUninstall(argc, argv, true);
         pauseForUser();
         return result;
     }
@@ -628,10 +865,16 @@ int wmain(int argc, wchar_t** argv) {
         return doRegister();
     }
     if (command == L"unregister") {
-        return doUnregister();
+        return doUnregister(argc, argv);
     }
     if (command == L"uninstall") {
         return doUninstall(argc, argv);
+    }
+    if (command == L"is-protected") {
+        return doIsProtected();
+    }
+    if (command == L"check-code") {
+        return doCheckCode(argc, argv);
     }
     if (command == L"provision") {
         return doProvision(argc, argv);
@@ -670,8 +913,25 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
     if (command == L"enable") {
+        // An enrolled device with no deadline is meant to be locked — that is the state
+        // a device sits in between enrolling and its first unlock token, and arming it
+        // is the point. What must not happen is arming a device with no store: it has
+        // no secret, so no token can ever verify, and the machine would be shut for
+        // good with no code in existence that opens it.
+        StoredDevice enrolled;
+        bool provisioned = LocalStore::load(LocalStore::defaultPath(), enrolled);
+        if (!provisioned && !hasFlag(argc, argv, L"--force")) {
+            std::printf("This device is not enrolled, so it holds no key to verify an\n"
+                        "unlock token with. Enabling the lock would shut it permanently.\n"
+                        "Enroll it first, or pass --force if you really mean to.\n");
+            return 1;
+        }
         DeviceConfig::setLockEnabled(true);
         std::printf("The lock is enabled.\n");
+        if (provisioned && enrolled.state.lockDeadlineDay == 0) {
+            std::printf("This device has no unlock token yet, so it is LOCKED now. Enter a\n"
+                        "token at the login screen to start its term.\n");
+        }
         return 0;
     }
     if (command == L"disable") {
