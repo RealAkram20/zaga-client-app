@@ -13,6 +13,15 @@ struct EnrollResult {
     std::string serial;
     std::string model;
     std::string name;
+    // Days past the deadline before the lock engages, from the device's plan.
+    int graceDays = 0;
+};
+
+struct HeartbeatResult {
+    bool ok = false;
+    // The plan's current grace allowance, so a check-in refreshes a value that
+    // may have changed on the portal since enrollment. Negative = not reported.
+    int graceDays = -1;
 };
 
 struct TokenResult {
@@ -29,9 +38,9 @@ public:
 
     EnrollResult enroll(const std::string& enrollmentCode, const std::string& agentVersion);
 
-    bool heartbeat(const std::string& deviceToken,
-                   const std::string& status,
-                   const std::string& agentVersion);
+    HeartbeatResult heartbeat(const std::string& deviceToken,
+                              const std::string& status,
+                              const std::string& agentVersion);
 
     TokenResult fetchToken(const std::string& deviceToken);
 

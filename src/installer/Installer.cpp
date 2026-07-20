@@ -10,9 +10,11 @@
 #include <vector>
 
 #include "DeviceConfig.h"
+#include "EnrollCodec.h"
 #include "LocalStore.h"
 #include "LockGate.h"
 #include "PortalClient.h"
+#include "ProvisioningBundle.h"
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -136,11 +138,13 @@ DWORD runProcess(const std::wstring& commandLine) {
 }
 
 bool registerHeartbeatTask(const std::wstring& exePath) {
-    // Every 15 minutes rather than hourly: this task is not only a check-in, it is what
-    // enforces the lock on an already-open session. An hour of free use after going
-    // overdue is an hour too many, and the run is cheap when nothing has changed.
+    // Every 5 minutes: this task is not only a check-in, it is what enforces the lock on
+    // an already-open session that has gone overdue. Enrolling and applying a code now
+    // enforce instantly on their own, so this is the safety net for a deadline that
+    // passes while the machine is running; a few minutes of grace is acceptable, an hour
+    // is not. The run is cheap when nothing has changed.
     std::wstring command = systemExe(L"schtasks.exe") +
-        L" /Create /F /RU SYSTEM /SC MINUTE /MO 15" +
+        L" /Create /F /RU SYSTEM /SC MINUTE /MO 5" +
         L" /TN \"" + TASK_NAME + L"\"" +
         L" /TR \"\\\"" + exePath + L"\\\" heartbeat\"";
     return runProcess(command) == 0;
@@ -258,6 +262,52 @@ std::string argValue(int argc, wchar_t** argv, const wchar_t* name) {
     return std::string();
 }
 
+// Reads a small text file whole. Bounded because the only thing that legitimately
+// arrives this way is a provisioning bundle of a few hundred bytes, and the path comes
+// from whoever is standing at the machine with a memory stick.
+bool readFileText(const std::wstring& path, std::string& out) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > 64 * 1024) {
+        CloseHandle(file);
+        return false;
+    }
+
+    out.resize(static_cast<size_t>(size.QuadPart));
+    DWORD read = 0;
+    bool ok = ReadFile(file, &out[0], static_cast<DWORD>(out.size()), &read, nullptr) &&
+              read == out.size();
+    CloseHandle(file);
+    if (!ok) {
+        return false;
+    }
+
+    // Browsers and editors are free to leave a byte-order mark on a .json download, and
+    // the parser would choke on it.
+    if (out.size() >= 3 && static_cast<unsigned char>(out[0]) == 0xEF &&
+        static_cast<unsigned char>(out[1]) == 0xBB &&
+        static_cast<unsigned char>(out[2]) == 0xBF) {
+        out.erase(0, 3);
+    }
+    return true;
+}
+
+// Paths keep their original characters — narrowing and widening a path that came in
+// as UTF-16 is a good way to lose a customer's name out of a folder.
+std::wstring argValueW(int argc, wchar_t** argv, const wchar_t* name) {
+    for (int i = 2; i + 1 < argc; ++i) {
+        if (_wcsicmp(argv[i], name) == 0) {
+            return argv[i + 1];
+        }
+    }
+    return std::wstring();
+}
+
 // A switch that carries no value of its own, e.g. --force.
 bool hasFlag(int argc, wchar_t** argv, const wchar_t* name) {
     for (int i = 2; i < argc; ++i) {
@@ -365,7 +415,7 @@ int doInstall() {
     std::printf("Management app: %s\n",
                 haveApp ? "installed (Start menu > Zaga Device Lock)"
                         : "not shipped next to the installer (skipped)");
-    std::printf("Hourly portal check-in %s.\n",
+    std::printf("Portal check-in (every 5 minutes) %s.\n",
                 scheduled ? "scheduled" : "could not be scheduled");
     std::printf("Provision the device, then run \"zaga_installer enable\" to arm it.\n");
     return 0;
@@ -394,7 +444,7 @@ int doRegister() {
     std::string uninstallCode = DeviceConfig::ensureUninstallCode();
     std::string accountNumber = adoptOrMintAccountNumber();
 
-    std::printf("Registered. The lock is dormant until enrollment; hourly check-in %s.\n",
+    std::printf("Registered. The lock is dormant until enrollment; check-in (every 5 minutes) %s.\n",
                 scheduled ? "scheduled" : "could not be scheduled");
     std::printf("Account number:      %s\n", accountNumber.c_str());
     if (uninstallCode.empty()) {
@@ -462,9 +512,10 @@ int doUninstall(int argc, wchar_t** argv, bool interactive = false) {
     if (DeviceConfig::uninstallProtected()) {
         std::string code = argValue(argc, argv, L"--code");
         if (code.empty() && interactive) {
-            std::printf("Removal of this device is protected.\n"
-                        "Contact support for the uninstall code. It is released once the\n"
-                        "payment plan is complete.\n\n");
+            std::printf("Uninstall Locked.\n"
+                        "You cannot uninstall Zaga Device Lock until the payment plan is\n"
+                        "fully completed. Once paid in full, contact Support to receive the\n"
+                        "uninstall code, then enter it below.\n\n");
             code = promptLine("Uninstall code: ");
         }
         if (code.empty() || !DeviceConfig::checkUninstallCode(code)) {
@@ -502,12 +553,81 @@ int doUninstall(int argc, wchar_t** argv, bool interactive = false) {
     return 0;
 }
 
+// Defined further down; declared here so provisioning can evict a live session the
+// moment it arms, instead of leaving the machine running until the next heartbeat.
+bool disconnectActiveSession();
+
+// Reads the lock state from the local store and, if the device is locked, returns the
+// signed-in session to the logon screen. Judged purely locally, so it enforces with the
+// network unplugged — pulling the cable is not a way to keep using an overdue device.
+// The one place a lock is turned into an actual eviction; every arming path calls it.
+void enforceIfLocked() {
+    GateInfo info = LockGate::describe();
+    if (info.locked) {
+        std::printf("Device is locked (%s). Returning to the logon screen.\n",
+                    info.statusText.c_str());
+        if (disconnectActiveSession()) {
+            std::printf("Signed-in session disconnected.\n");
+        }
+    }
+}
+
+// Everything that has to become true once a device is holding its credentials, no
+// matter how they got there — over the API, or carried in on a memory stick. Both
+// routes end here so an offline device is armed exactly as hard as an enrolled one;
+// a machine that locks only when it happens to have Wi-Fi is not locked at all.
+int finishProvisioning(const StoredDevice& device) {
+    if (!LocalStore::save(LocalStore::defaultPath(), device)) {
+        std::printf("Could not write the device store (run as administrator).\n");
+        return 1;
+    }
+
+    // An enrolled device must not be removable without authorization. Normally the
+    // code was minted at install; this covers machines installed before codes were
+    // generated, and any install where the write did not land.
+    std::string uninstallCode = DeviceConfig::ensureUninstallCode();
+
+    // The portal is the billing authority once a record exists: the customer pays
+    // against the number it holds. Normally that is the number this device minted and
+    // an operator registered, and this is a no-op; when they differ — a typo at
+    // registration, or a device enrolled against an older record — the machine follows
+    // the portal rather than showing a number nobody can pay against.
+    if (!device.accountNumber.empty() &&
+        device.accountNumber != DeviceConfig::accountNumber()) {
+        DeviceConfig::setAccountNumber(device.accountNumber);
+    }
+
+    // Provisioning arms the lock and leaves the device locked: it has no deadline yet,
+    // and the gate reads "no deadline" as overdue. That is deliberate — the device is
+    // financed but nothing has been paid into it, so it stays shut until the first
+    // unlock token is entered, and the term is counted from that moment rather than
+    // from a date nobody was watching.
+    DeviceConfig::setLockEnabled(true);
+
+    std::printf("Provisioned %s. The device store is written.\n",
+                device.accountNumber.c_str());
+    std::printf("Lock enforcement:    ARMED. This device is LOCKED until an unlock\n");
+    std::printf("                     token is entered; the term starts from then.\n");
+    if (uninstallCode.empty()) {
+        std::printf("WARNING: no uninstall code could be stored, so removal is NOT protected.\n");
+    } else {
+        std::printf("Uninstall code:      %s\n", uninstallCode.c_str());
+    }
+
+    // Lock the machine now, not at the next heartbeat. Enrolling is the moment the
+    // device becomes financed-but-unpaid, and the tech was warned the screen would
+    // lock; leaving the session live until a 5-minute tick is what made the field
+    // device look like it had not locked at all.
+    enforceIfLocked();
+    return 0;
+}
+
 int doProvision(int argc, wchar_t** argv) {
     std::string account = argValue(argc, argv, L"--account");
     std::string secret = argValue(argc, argv, L"--secret");
     if (account.empty() || secret.empty()) {
         std::printf("Usage: zaga_installer provision --account ZG-00000 --secret <64 hex> "
-                    "[--serial S] [--model M] [--name N]\n");
+                    "[--serial S] [--model M] [--name N] [--grace DAYS]\n");
         return 1;
     }
 
@@ -518,13 +638,87 @@ int doProvision(int argc, wchar_t** argv) {
     device.model = argValue(argc, argv, L"--model");
     device.name = argValue(argc, argv, L"--name");
 
-    if (!LocalStore::save(LocalStore::defaultPath(), device)) {
-        std::printf("Could not write the device store (run as administrator).\n");
+    std::string grace = argValue(argc, argv, L"--grace");
+    if (!grace.empty()) {
+        int days = std::atoi(grace.c_str());
+        if (days < 0 || days > 255) {
+            std::printf("--grace must be between 0 and 255 days.\n");
+            return 1;
+        }
+        device.state.graceDays = static_cast<uint8_t>(days);
+    }
+
+    return finishProvisioning(device);
+}
+
+// Enrolls from the typed offline code on the device's portal page — the path for a
+// machine that will never see a network. The code carries the secret bound to this
+// device's own account number, so a code minted for a different record refuses to
+// arm this one. Same end state as enrolling online: locked until the first unlock
+// code is typed in.
+int doEnrollOffline(int argc, wchar_t** argv) {
+    std::string code = argValue(argc, argv, L"--code");
+    if (code.empty()) {
+        std::printf("Usage: zaga_installer enroll-offline --code ZGE-XXXXX-...\n");
         return 1;
     }
 
-    std::printf("Provisioned %s. The device store is written.\n", account.c_str());
-    return 0;
+    // The number this machine minted at install and shows on its screen — the same
+    // number the operator is told to register the device under. The code was minted
+    // against the portal record, so this is the binding that catches a mismatch.
+    std::string account = DeviceConfig::ensureAccountNumber();
+    if (account.empty()) {
+        std::printf("This machine has no account number yet. Open the Zaga app once, "
+                    "then try again.\n");
+        return 1;
+    }
+
+    std::optional<EnrollCodec::Enrollment> enrollment = EnrollCodec::decode(code, account);
+    if (!enrollment) {
+        // A 40-bit check cannot tell a slipped finger from a mismatched record, so
+        // the message has to send the reader to both places.
+        std::string reason = "Code rejected. Retype it carefully, and confirm the "
+                             "account number on the device's portal page exactly "
+                             "matches " + account + ".";
+        DeviceConfig::setLastError(reason);
+        std::printf("%s\n", reason.c_str());
+        return 1;
+    }
+    DeviceConfig::clearLastError();
+
+    StoredDevice device;
+    device.accountNumber = account;
+    device.hmacSecretHex = enrollment->secretHex;
+    device.state.graceDays = enrollment->graceDays;
+
+    return finishProvisioning(device);
+}
+
+// Reads a provisioning bundle downloaded from the portal, for a device with no way to
+// reach it. Same end state as enrolling: the device holds the secret its unlock codes
+// are signed with, and is locked until the first one is typed in.
+int doProvisionFile(int argc, wchar_t** argv) {
+    std::wstring path = argValueW(argc, argv, L"--file");
+    if (path.empty()) {
+        std::printf("Usage: zaga_installer provision-file --file <bundle.json>\n");
+        return 1;
+    }
+
+    std::string text;
+    if (!readFileText(path, text)) {
+        std::printf("Could not read %s.\n", narrow(path).c_str());
+        return 1;
+    }
+
+    BundleResult bundle = parseProvisioningBundle(text);
+    if (!bundle.ok) {
+        DeviceConfig::setLastError(bundle.message);
+        std::printf("%s\n", bundle.message.c_str());
+        return 1;
+    }
+    DeviceConfig::clearLastError();
+
+    return finishProvisioning(bundle.device);
 }
 
 std::string resolvePortalUrl(int argc, wchar_t** argv) {
@@ -561,47 +755,11 @@ int enrollWith(const std::string& code, const std::string& portal) {
     device.model = result.model;
     device.name = result.name;
     device.deviceToken = result.token;
+    device.state.graceDays = static_cast<uint8_t>(result.graceDays);
 
-    if (!LocalStore::save(LocalStore::defaultPath(), device)) {
-        std::printf("Enrolled, but could not write the device store (run as administrator).\n");
-        return 1;
-    }
-
-    // An enrolled device must not be removable without authorization. Normally the
-    // code was minted at install; this covers machines installed before codes were
-    // generated, and any install where the write did not land.
-    std::string uninstallCode = DeviceConfig::ensureUninstallCode();
-
-    // The portal is the billing authority once a record exists: the customer pays
-    // against the number it holds. Normally that is the number this device minted and
-    // an operator registered, and this is a no-op; when they differ — a typo at
-    // registration, or a device enrolled against an older record — the machine follows
-    // the portal rather than showing a number nobody can pay against.
-    if (!result.accountNumber.empty() &&
-        result.accountNumber != DeviceConfig::accountNumber()) {
-        DeviceConfig::setAccountNumber(result.accountNumber);
-    }
-
-    // Enrolling arms the lock and leaves the device locked: it has no deadline yet, and
-    // the gate reads "no deadline" as overdue. That is deliberate — the device is
-    // financed but nothing has been paid into it, so it stays shut until the first
-    // unlock token is entered, and the term is counted from that moment rather than
-    // from an enrollment date nobody was watching.
-    //
-    // This is only safe because the portal refuses to enroll a device that is not on a
-    // plan, so a token always exists for the operator to type in.
-    DeviceConfig::setLockEnabled(true);
-
-    std::printf("Enrolled %s from the portal. The device store is written.\n",
-                result.accountNumber.c_str());
-    std::printf("Lock enforcement:    ARMED. This device is LOCKED until an unlock\n");
-    std::printf("                     token is entered; the term starts from then.\n");
-    if (uninstallCode.empty()) {
-        std::printf("WARNING: no uninstall code could be stored, so removal is NOT protected.\n");
-    } else {
-        std::printf("Uninstall code:      %s\n", uninstallCode.c_str());
-    }
-    return 0;
+    // Arming here is only safe because the portal refuses to enroll a device that is
+    // not on a plan, so an unlock token always exists for the operator to type in.
+    return finishProvisioning(device);
 }
 
 int doEnroll(int argc, wchar_t** argv) {
@@ -634,34 +792,36 @@ bool disconnectActiveSession() {
 }
 
 int doHeartbeat() {
-    std::string portal = DeviceConfig::portalUrl();
     StoredDevice device;
-    if (portal.empty() || !LocalStore::load(LocalStore::defaultPath(), device) ||
-        device.deviceToken.empty()) {
-        std::printf("Not enrolled. Run \"enroll\" first.\n");
+    if (!LocalStore::load(LocalStore::defaultPath(), device)) {
+        std::printf("Not provisioned. Run \"enroll\" first.\n");
         return 1;
     }
 
     GateInfo info = LockGate::describe();
-    bool ok = PortalClient(portal).heartbeat(device.deviceToken, info.statusText, AGENT_VERSION);
-    std::printf(ok ? "Checked in with the portal.\n" : "Could not reach the portal.\n");
 
-    // Enforce the lock on a session that is already open. Judged from the local store,
-    // never from the check-in above, so a device that has gone overdue still locks with
-    // the network unplugged — pulling the cable must not be a way to keep using it.
-    if (info.locked) {
-        std::printf("Device is locked (%s). Returning to the logon screen.\n",
-                    info.statusText.c_str());
-        if (disconnectActiveSession()) {
-            std::printf("Signed-in session disconnected.\n");
+    // Checking in with the portal is best-effort and needs both a network and a device
+    // token — an offline-enrolled device has neither. It must never gate enforcement:
+    // an overdue device has to lock whether or not it can phone home.
+    std::string portal = DeviceConfig::portalUrl();
+    if (!portal.empty() && !device.deviceToken.empty()) {
+        HeartbeatResult beat = PortalClient(portal).heartbeat(device.deviceToken, info.statusText, AGENT_VERSION);
+        std::printf(beat.ok ? "Checked in with the portal.\n" : "Could not reach the portal.\n");
+
+        // The plan's grace allowance may have changed on the portal since this
+        // device enrolled; a successful check-in is the moment to pick that up.
+        if (beat.ok && beat.graceDays >= 0 &&
+            static_cast<uint8_t>(beat.graceDays) != device.state.graceDays) {
+            device.state.graceDays = static_cast<uint8_t>(beat.graceDays);
+            LocalStore::save(LocalStore::defaultPath(), device);
         }
     }
 
-    // Deliberately does not pull or apply a token. A newly enrolled device is locked
-    // and stays locked until someone enters the first unlock token, which is what
-    // starts its term. Applying one here would open the device on its own, before
-    // anyone had chosen to start the clock.
-    return ok ? 0 : 1;
+    // Enforce from the local store, always — offline devices included. Deliberately does
+    // not pull or apply a token: a device stays locked until someone enters the first
+    // unlock token, which is what starts its term.
+    enforceIfLocked();
+    return 0;
 }
 
 int doApplyCode(int argc, wchar_t** argv) {
@@ -797,12 +957,16 @@ void usage() {
         "  is-protected                    exit 0 when removal protection is on\n"
         "  check-code --code <c>           exit 0 when the code would authorise removal\n"
         "  enroll --code <c> --url <u>     provision from the portal over the network\n"
+        "  enroll-offline --code <ZGE...>  enroll from the typed portal code, no network\n"
         "  provision --account --secret    write the device store from a bundle offline\n"
+        "  provision-file --file <f>       same, from a bundle downloaded off the portal\n"
         "  heartbeat                       check in with the portal\n"
         "  fetch-token                     pull an unlock token from the portal and apply it\n"
         "  apply-code --code <c>           apply a typed unlock code through the verifier\n"
-        "  schedule | unschedule           add or remove the hourly check-in task\n"
+        "  schedule | unschedule           add or remove the check-in task (every 5 min)\n"
         "  set-url --url <u>               set the portal base url\n"
+        "  set-instructions --text <t>     set the lock-screen \"where to pay\" line\n"
+        "  set-support --phone <p>         set the lock-screen support contact line\n"
         "  enable [--force] | disable      turn the lock on or off\n"
         "  protect --code <c>              require a code to uninstall\n"
         "  unprotect --code <c>            remove uninstall protection\n"
@@ -849,11 +1013,14 @@ int wmain(int argc, wchar_t** argv) {
 
     bool writesMachineState =
         command == L"install" || command == L"uninstall" || command == L"provision" ||
+        command == L"provision-file" ||
         command == L"register" || command == L"unregister" ||
-        command == L"enroll" || command == L"fetch-token" || command == L"apply-code" ||
+        command == L"enroll" || command == L"enroll-offline" ||
+        command == L"fetch-token" || command == L"apply-code" ||
         command == L"enable" ||
         command == L"disable" || command == L"protect" || command == L"unprotect" ||
-        command == L"schedule" || command == L"unschedule" || command == L"set-url";
+        command == L"schedule" || command == L"unschedule" || command == L"set-url" ||
+        command == L"set-instructions" || command == L"set-support";
     if (writesMachineState && !requireAdmin()) {
         return 1;
     }
@@ -879,8 +1046,14 @@ int wmain(int argc, wchar_t** argv) {
     if (command == L"provision") {
         return doProvision(argc, argv);
     }
+    if (command == L"provision-file") {
+        return doProvisionFile(argc, argv);
+    }
     if (command == L"enroll") {
         return doEnroll(argc, argv);
+    }
+    if (command == L"enroll-offline") {
+        return doEnrollOffline(argc, argv);
     }
     if (command == L"heartbeat") {
         return doHeartbeat();
@@ -893,7 +1066,7 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (command == L"schedule") {
         std::printf(registerHeartbeatTask(installedInstaller())
-                        ? "Hourly check-in scheduled.\n"
+                        ? "Check-in scheduled (every 5 minutes).\n"
                         : "Could not schedule the check-in.\n");
         return 0;
     }
@@ -910,6 +1083,23 @@ int wmain(int argc, wchar_t** argv) {
         }
         DeviceConfig::setPortalUrl(url);
         std::printf("Portal URL set.\n");
+        return 0;
+    }
+    if (command == L"set-instructions") {
+        // Blank clears it, restoring the built-in default (portal URL, or a vendor
+        // line).
+        std::string text = argValue(argc, argv, L"--text");
+        DeviceConfig::setUnlockInstructions(text);
+        std::printf(text.empty() ? "Unlock instructions cleared.\n"
+                                 : "Unlock instructions set.\n");
+        return 0;
+    }
+    if (command == L"set-support") {
+        // Blank clears it, restoring the built-in business number.
+        std::string phone = argValue(argc, argv, L"--phone");
+        DeviceConfig::setSupportContact(phone);
+        std::printf(phone.empty() ? "Support contact reset to the default.\n"
+                                  : "Support contact set.\n");
         return 0;
     }
     if (command == L"enable") {
@@ -932,6 +1122,9 @@ int wmain(int argc, wchar_t** argv) {
             std::printf("This device has no unlock token yet, so it is LOCKED now. Enter a\n"
                         "token at the login screen to start its term.\n");
         }
+
+        // Arming an already-overdue device should shut it now, not at the next tick.
+        enforceIfLocked();
         return 0;
     }
     if (command == L"disable") {

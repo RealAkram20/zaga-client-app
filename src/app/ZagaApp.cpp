@@ -21,6 +21,7 @@
 #endif
 
 #include <windows.h>
+#include <commdlg.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -37,6 +38,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "gdi32.lib")
 
 // Use the modern (v6) common controls so native dialogs and focus rects look right.
@@ -82,11 +84,11 @@ enum ActionId {
     ACT_COPY_SERIAL,
     ACT_COPY_MANUFACTURER,
     ACT_COPY_UNINSTALL,
-    ACT_TOGGLE_LOCK,
     ACT_CHECKIN,
     ACT_FETCH,
     ACT_OPEN_PORTAL,
     ACT_ENROLL,
+    ACT_PROVISION_OFFLINE,
     ACT_ENTER_CODE,
     ACT_UNINSTALL,
     ACT_REFRESH,
@@ -226,7 +228,7 @@ DWORD WINAPI checkInThread(LPVOID) {
         !device.deviceToken.empty()) {
         GateInfo info = LockGate::describe();
         bool ok = PortalClient(portal).heartbeat(device.deviceToken, info.statusText,
-                                                 AGENT_VERSION);
+                                                 AGENT_VERSION).ok;
         result = ok ? Conn::Online : Conn::Offline;
     } else {
         result = Conn::Unknown;
@@ -278,8 +280,9 @@ DWORD runInstaller(const std::wstring& parameters, bool elevated) {
     return code;
 }
 
-// Run a privileged verb, refresh, and set a result message.
-void doPrivileged(const std::wstring& params, const wchar_t* okMsg,
+// Run a privileged verb, refresh, and set a result message. Reports whether the verb
+// actually succeeded, so a caller can offer a way out of a failure.
+bool doPrivileged(const std::wstring& params, const wchar_t* okMsg,
                   const wchar_t* failMsg) {
     DWORD code = runInstaller(params, true);
     if (code == 0) {
@@ -302,6 +305,7 @@ void doPrivileged(const std::wstring& params, const wchar_t* okMsg,
     refreshModel();
     startCheckIn();
     InvalidateRect(g_wnd, nullptr, FALSE);
+    return code == 0;
 }
 
 // ---- clipboard -------------------------------------------------------------
@@ -467,21 +471,102 @@ bool inputBox(HWND parent, const wchar_t* title, const wchar_t* prompt,
 }
 
 // ---- action handlers -------------------------------------------------------
+void onProvisionOffline();
+
+// Warn before anything arms: the machine locks the moment it enrolls, and the only
+// thing that opens it again is an unlock code from the portal. A technician who
+// arrives without one has bricked the device until they go back for it.
+bool confirmArming() {
+    return MessageBoxW(g_wnd,
+                       L"This will enroll the device and lock it immediately.\n\n"
+                       L"It stays locked until an unlock code from the portal is "
+                       L"entered. Make sure you have one before continuing.",
+                       L"Enroll device", MB_ICONWARNING | MB_OKCANCEL) == IDOK;
+}
+
 void onEnroll() {
+    // One door for both worlds: the code is asked for first, and the code itself
+    // says which kind it is. A short code is the online one and needs the portal's
+    // address; a long ZGE code carries everything and touches no network at all.
+    std::wstring code;
+    if (!inputBox(g_wnd, L"Enroll device",
+                  L"Enrollment code from the portal (short online code, or long "
+                  L"ZGE-… offline code):",
+                  L"", false, code) ||
+        code.empty()) {
+        return;
+    }
+
+    std::wstring compact;
+    for (wchar_t c : code) {
+        if (c == L'-' || c == L' ' || c == L'\t') {
+            continue;
+        }
+        compact += static_cast<wchar_t>(towupper(c));
+    }
+
+    // Offline iff the ZGE prefix AND the exact length: an online code is ten random
+    // characters and is perfectly entitled to start with ZGE.
+    if (compact.rfind(L"ZGE", 0) == 0 && compact.size() == 63) {
+        if (!confirmArming()) {
+            return;
+        }
+        doPrivileged(L"enroll-offline --code \"" + code + L"\"",
+                     L"Enrolled offline. Enter an unlock code to open the device.",
+                     L"Offline enrollment failed.");
+        return;
+    }
+
     std::wstring url = g_model.portalUrl.empty() ? L"http://" : g_model.portalUrl;
     if (!inputBox(g_wnd, L"Enroll device", L"Portal URL (e.g. http://192.168.1.20/zagatech):",
                   url, false, url) || url.empty()) {
         return;
     }
-    std::wstring code;
-    if (!inputBox(g_wnd, L"Enroll device",
-                  L"One-time enrollment code from the portal:", L"", false, code) ||
-        code.empty()) {
+    if (doPrivileged(L"enroll --url \"" + url + L"\" --code \"" + code + L"\"",
+                     L"Device enrolled from the portal.",
+                     L"Enrollment failed. Check the URL and code, then try again.")) {
         return;
     }
-    doPrivileged(L"enroll --url \"" + url + L"\" --code \"" + code + L"\"",
-                 L"Device enrolled from the portal.",
-                 L"Enrollment failed. Check the URL and code, then try again.");
+
+    // Point at the offline routes at the one moment they are actually wanted:
+    // standing at a machine that cannot reach the portal. Only when the device is
+    // still unprovisioned — a re-enrol that failed has a working device behind it.
+    if (!g_model.provisioned) {
+        MessageBoxW(g_wnd,
+                    L"No luck reaching the portal?\n\n"
+                    L"This device can enroll offline: on the device's portal page, "
+                    L"issue the offline enrollment code (ZGE-…), then run Enroll "
+                    L"again and type it in. Bring an unlock code too — the device "
+                    L"locks the moment it enrolls.",
+                    L"Enrollment failed", MB_ICONINFORMATION | MB_OK);
+    }
+}
+
+// Provisions from a bundle downloaded off the portal, for a device that has no way to
+// reach it. The bundle carries the secret this machine's unlock codes are signed with,
+// which is the one thing it cannot work out for itself and the only reason enrolling
+// needs a network at all.
+void onProvisionOffline() {
+    wchar_t path[MAX_PATH] = {0};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_wnd;
+    ofn.lpstrFilter = L"Zaga provisioning bundle (*.json)\0*.json\0All files\0*.*\0";
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = ARRAYSIZE(path);
+    ofn.lpstrTitle = L"Choose the provisioning bundle downloaded from the portal";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    if (!GetOpenFileNameW(&ofn) || path[0] == L'\0') {
+        return;
+    }
+
+    if (!confirmArming()) {
+        return;
+    }
+
+    doPrivileged(std::wstring(L"provision-file --file \"") + path + L"\"",
+                 L"Provisioned offline. Enter an unlock code to open the device.",
+                 L"Offline provisioning failed. Check the bundle file, then try again.");
 }
 
 void onEnterCode() {
@@ -494,21 +579,6 @@ void onEnterCode() {
     doPrivileged(L"apply-code --code \"" + code + L"\"",
                  L"Code accepted. The device is unlocked.",
                  L"That code was not accepted. The device stays locked.");
-}
-
-void onToggleLock() {
-    if (g_model.lockEnabled) {
-        doPrivileged(L"disable", L"Enforcement disabled. The device will not lock.",
-                     L"Could not disable enforcement.");
-    } else {
-        if (!g_model.provisioned) {
-            g_model.lastMessage = L"Enroll the device before arming the lock.";
-            InvalidateRect(g_wnd, nullptr, FALSE);
-            return;
-        }
-        doPrivileged(L"enable", L"Enforcement armed. The device locks when overdue.",
-                     L"Could not arm enforcement.");
-    }
 }
 
 void onFetch() {
@@ -530,6 +600,18 @@ std::wstring packageUninstaller() {
 }
 
 void onUninstall() {
+    // The business rule, stated before anything else happens: the uninstall code is
+    // held by Support and released only when the payment plan is fully paid. Whoever
+    // clicked this needs to hear that first — and someone Support has already given
+    // the code to just clicks through to enter it.
+    if (g_model.removalProtected) {
+        MessageBoxW(g_wnd,
+                    L"You cannot uninstall Zaga Device Lock until your payment plan "
+                    L"is fully completed.\n\nOnce paid in full, contact Support to "
+                    L"receive your uninstall code.",
+                    L"Uninstall Locked", MB_ICONWARNING | MB_OK);
+    }
+
     // Package install: hand off to the Windows uninstaller (it runs our unregister
     // step via the package, then removes the files) and close the app.
     std::wstring unins = packageUninstaller();
@@ -548,8 +630,7 @@ void onUninstall() {
     std::wstring params = L"uninstall";
     if (g_model.removalProtected) {
         if (!inputBox(g_wnd, L"Uninstall Zaga",
-                      L"Removal of this device is protected.\n\nContact support for the "
-                      L"uninstall code. It is released once your payment plan is complete.",
+                      L"If Support has given you your uninstall code, enter it below:",
                       L"", false, code) ||
             code.empty()) {
             return;
@@ -601,10 +682,10 @@ void dispatch(int action) {
         case ACT_COPY_SERIAL:       copyField(g_model.serial, L"Serial"); break;
         case ACT_COPY_MANUFACTURER: copyField(g_model.manufacturer, L"Manufacturer"); break;
         case ACT_COPY_UNINSTALL:    copyField(g_model.uninstallCode, L"Uninstall code"); break;
-        case ACT_TOGGLE_LOCK: onToggleLock(); break;
         case ACT_CHECKIN:     startCheckIn(); break;
         case ACT_FETCH:       onFetch(); break;
         case ACT_OPEN_PORTAL: onOpenPortal(); break;
+        case ACT_PROVISION_OFFLINE: onProvisionOffline(); break;
         case ACT_ENROLL:      onEnroll(); break;
         case ACT_ENTER_CODE:  onEnterCode(); break;
         case ACT_UNINSTALL:   onUninstall(); break;
@@ -846,37 +927,6 @@ void paint(HWND hwnd, HDC target, const RECT& client) {
         y = card.bottom + 14;
     }
 
-    // --- enforcement row ---
-    {
-        RECT card{M, y, M + W, y + 66};
-        fillRound(dc, card, COL_CARD, COL_CARD_EDGE, 14);
-        RECT l{M + 20, y + 12, M + W - 160, y + 30};
-        text(dc, L"Lock enforcement", l, g_fValue, COL_TEXT, DT_LEFT | DT_SINGLELINE);
-        RECT s{M + 20, y + 32, M + W - 150, y + 52};
-        // Both clauses are always shown, so the longest pairing still has to fit the
-        // line. The armed/dormant word is left to the badge above rather than
-        // repeated here, which is what buys the room.
-        //
-        // "Locked now" matters most: a credential provider only shows at the login
-        // screen, so an armed, locked device looks identical to an unlocked one until
-        // someone signs out. Saying so stops that reading as the lock not working.
-        std::wstring sub;
-        if (g_model.lockEnabled && g_model.locked) {
-            sub = L"LOCKED — sign out to see it.";
-        } else if (g_model.lockEnabled) {
-            sub = L"Login gated when overdue.";
-        } else {
-            sub = L"Login not gated.";
-        }
-        sub += g_model.removalProtected ? L"  ·  Removal protected."
-                                        : L"  ·  Removal unprotected.";
-        text(dc, sub, s, g_fLabel, COL_MUTED, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        RECT b{M + W - 140, y + 17, M + W - 20, y + 49};
-        button(dc, b, ACT_TOGGLE_LOCK, g_model.lockEnabled ? L"Disable" : L"Enable",
-               g_model.lockEnabled ? STYLE_NORMAL : STYLE_PRIMARY, true);
-        y = card.bottom + 14;
-    }
-
     // --- portal card ---
     {
         RECT card{M, y, M + W, y + 128};
@@ -930,9 +980,20 @@ void paint(HWND hwnd, HDC target, const RECT& client) {
         button(dc, b2, ACT_ENTER_CODE, L"Enter unlock code", STYLE_NORMAL,
                g_model.provisioned);
         y = b1.bottom + 12;
-        RECT b3{M, y, M + W, y + 40};
-        button(dc, b3, ACT_UNINSTALL, L"Uninstall Zaga from this device", STYLE_DANGER, true);
-        y = b3.bottom + 16;
+
+        // The way in for a device that will never see the portal. Deliberately second
+        // to enrolling: it needs a file carrying the device's HMAC secret, so it is the
+        // fallback for machines with no network, not the everyday route.
+        RECT bo{M, y, M + W, y + 40};
+        button(dc, bo, ACT_PROVISION_OFFLINE,
+               g_model.provisioned ? L"Re-provision offline from a bundle file"
+                                   : L"Provision offline from a bundle file",
+               STYLE_NORMAL, true);
+        y = bo.bottom + 16;
+
+        // No uninstall button, deliberately: showing one invites attempts. Removal
+        // still exists — code-gated through Add/Remove Programs — for staff who
+        // know where to look; ACT_UNINSTALL and onUninstall stay wired for it.
     }
 
     // --- footer / message ---
@@ -1056,7 +1117,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_ZAGA));
     RegisterClassW(&wc);
 
-    const int cw = 560, ch = 774;
+    const int cw = 560, ch = 746;
     RECT r{0, 0, cw, ch};
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     AdjustWindowRect(&r, style, FALSE);

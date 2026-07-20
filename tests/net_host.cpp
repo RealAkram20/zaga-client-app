@@ -25,8 +25,9 @@ int main(int argc, char** argv) {
                 enroll.accountNumber.c_str(), enroll.hmacSecret.size(),
                 enroll.token.size(), enroll.serial.c_str(), enroll.model.c_str());
 
-    bool heartbeat = client.heartbeat(enroll.token, "locked", "0.1.0");
-    std::printf("heartbeat: %s\n", heartbeat ? "ok" : "FAILED");
+    HeartbeatResult heartbeat = client.heartbeat(enroll.token, "locked", "0.1.0");
+    std::printf("heartbeat: %s grace_days=%d\n", heartbeat.ok ? "ok" : "FAILED",
+                heartbeat.graceDays);
 
     TokenResult token = client.fetchToken(enroll.token);
     std::printf("fetch-token: %s\n", token.ok ? token.token.c_str() : token.message.c_str());

@@ -16,6 +16,18 @@ public:
     static std::string portalUrl();
     static void setPortalUrl(const std::string& url);
 
+    // What the lock screen tells a stranded customer about buying an unlock code —
+    // set once, business-wide, by the operator. Empty by default; the provider then
+    // falls back to the portal URL, and to a generic vendor line when even that is
+    // unknown. Read as SYSTEM at the logon screen, so it lives in the machine hive.
+    static std::string unlockInstructions();
+    static void setUnlockInstructions(const std::string& instructions);
+
+    // The support line shown on the lock screen. Empty means the built-in business
+    // number; settable per fleet the same way as the instructions.
+    static std::string supportContact();
+    static void setSupportContact(const std::string& contact);
+
     // The device's own account number, minted here so it exists before any portal
     // knows about this machine: an operator reads it out of the app and registers the
     // device with it. Not a secret — the customer reads it off the lock screen — so

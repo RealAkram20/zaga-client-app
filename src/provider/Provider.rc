@@ -1,0 +1,5 @@
+#include "Resource.h"
+
+// Path is relative to this .rc file. The bitmap is a 128x128 24-bit image so LogonUI
+// renders it directly, with no alpha channel to misinterpret as transparency.
+IDB_TILE BITMAP "../../assets/zaga-tile.bmp"

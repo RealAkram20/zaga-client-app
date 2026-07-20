@@ -38,11 +38,33 @@ std::string messageOf(const std::string& body, const std::string& fallback) {
     return fallback;
 }
 
+// -1 when the field is missing or out of range — an old portal, not zero grace.
+int graceDaysOf(const Json& json) {
+    const Json* grace = json.get("grace_days");
+    if (grace == nullptr || grace->type() != Json::Type::Number) {
+        return -1;
+    }
+    double days = grace->asNumber();
+    if (days < 0 || days > 255) {
+        return -1;
+    }
+    return static_cast<int>(days);
+}
+
 }
 
 PortalClient::PortalClient(const std::string& baseUrl) : _baseUrl(baseUrl) {
     while (!_baseUrl.empty() && _baseUrl.back() == '/') {
         _baseUrl.pop_back();
+    }
+
+    // "192.168.1.20/zagatech" is what someone types when asked for an address, and
+    // WinHTTP rejects it outright for want of a scheme — indistinguishable, from the
+    // outside, from the portal being down. Assume http rather than fail: the portals
+    // these devices enrol against are plain http on a local network, and anyone using
+    // https will have typed it.
+    if (!_baseUrl.empty() && _baseUrl.find("://") == std::string::npos) {
+        _baseUrl = "http://" + _baseUrl;
     }
 }
 
@@ -66,7 +88,7 @@ EnrollResult PortalClient::enroll(const std::string& enrollmentCode, const std::
 
     HttpResponse response = HttpClient::post(url("/api/device/enroll"), body);
     if (!response.completed) {
-        result.message = "Could not reach the portal.";
+        result.message = response.error;
         return result;
     }
 
@@ -88,17 +110,33 @@ EnrollResult PortalClient::enroll(const std::string& enrollmentCode, const std::
     result.serial = json.str("serial");
     result.model = json.str("model");
     result.name = json.str("name");
+    result.graceDays = graceDaysOf(json);
+    if (result.graceDays < 0) {
+        result.graceDays = 0;
+    }
     return result;
 }
 
-bool PortalClient::heartbeat(const std::string& deviceToken,
-                             const std::string& status,
-                             const std::string& agentVersion) {
+HeartbeatResult PortalClient::heartbeat(const std::string& deviceToken,
+                                        const std::string& status,
+                                        const std::string& agentVersion) {
+    HeartbeatResult result{};
+
     std::string body = "{" + field("status", status) + "," +
                        field("agent_version", agentVersion) + "}";
 
     HttpResponse response = HttpClient::post(url("/api/device/heartbeat"), body, deviceToken);
-    return response.completed && response.status == 200;
+    if (!response.completed || response.status != 200) {
+        return result;
+    }
+
+    result.ok = true;
+
+    Json json;
+    if (Json::parse(response.body, json)) {
+        result.graceDays = graceDaysOf(json);
+    }
+    return result;
 }
 
 TokenResult PortalClient::fetchToken(const std::string& deviceToken) {
@@ -106,7 +144,7 @@ TokenResult PortalClient::fetchToken(const std::string& deviceToken) {
 
     HttpResponse response = HttpClient::get(url("/api/device/token"), deviceToken);
     if (!response.completed) {
-        result.message = "Could not reach the portal.";
+        result.message = response.error;
         return result;
     }
 

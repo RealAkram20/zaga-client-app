@@ -89,9 +89,19 @@ GateInfo LockGate::describe() {
         return info;
     }
 
-    if (todayDay() >= device.state.lockDeadlineDay) {
+    // The plan may allow a grace window: the deadline passes, the machine keeps
+    // working, and only deadline + graceDays actually locks it. Zero grace days
+    // means lock on the deadline, exactly as before.
+    int64_t today = todayDay();
+    int64_t lockDay = device.state.lockDeadlineDay
+        + static_cast<int64_t>(device.state.graceDays);
+
+    if (today >= lockDay) {
         info.locked = true;
         info.statusText = "Payment overdue";
+    } else if (today >= device.state.lockDeadlineDay) {
+        info.locked = false;
+        info.statusText = "Grace period — pay now";
     } else {
         info.locked = false;
         info.statusText = "Active";

@@ -12,7 +12,7 @@ namespace zaga {
 namespace {
 
 const uint8_t MAGIC[4] = {'Z', 'G', 'S', '1'};
-constexpr uint8_t FORMAT_VERSION = 2;
+constexpr uint8_t FORMAT_VERSION = 3;
 
 class Writer {
 public:
@@ -180,6 +180,7 @@ std::vector<uint8_t> LocalStore::serialize(const StoredDevice& device) {
     writer.putI64(device.state.lockDeadlineDay);
     writer.putU8(static_cast<uint8_t>(device.state.status));
     writer.putU8(device.state.lastTokenWasGrace ? 1 : 0);
+    writer.putU8(device.state.graceDays);
     return writer.take();
 }
 
@@ -190,8 +191,10 @@ bool LocalStore::deserialize(const std::vector<uint8_t>& bytes, StoredDevice& de
         return false;
     }
 
+    // v2 stores predate graceDays; loading one must not wipe a live device's
+    // state, so it reads as grace 0 and upgrades on the next save.
     uint8_t version = 0;
-    if (!reader.getU8(version) || version != FORMAT_VERSION) {
+    if (!reader.getU8(version) || version < 2 || version > FORMAT_VERSION) {
         return false;
     }
 
@@ -211,12 +214,18 @@ bool LocalStore::deserialize(const std::vector<uint8_t>& bytes, StoredDevice& de
         && reader.getU8(status)
         && reader.getU8(grace);
 
+    uint8_t graceDays = 0;
+    if (ok && version >= 3) {
+        ok = reader.getU8(graceDays);
+    }
+
     if (!ok || status > static_cast<uint8_t>(DeviceStatus::Locked)) {
         return false;
     }
 
     device.state.status = static_cast<DeviceStatus>(status);
     device.state.lastTokenWasGrace = grace != 0;
+    device.state.graceDays = graceDays;
     return true;
 }
 

@@ -18,6 +18,9 @@ struct DeviceState {
     int64_t lockDeadlineDay = 0;
     DeviceStatus status = DeviceStatus::Locked;
     bool lastTokenWasGrace = false;
+    // Days past the deadline before the gate actually locks; 0 = lock on the
+    // deadline. Set by the plan at enrollment and refreshed on check-in.
+    uint8_t graceDays = 0;
 };
 
 }

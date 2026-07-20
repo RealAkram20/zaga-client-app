@@ -15,6 +15,8 @@ const wchar_t SUBKEY[] = L"SOFTWARE\\Zaga";
 const wchar_t VALUE_LOCK_ENABLED[] = L"LockEnabled";
 const wchar_t VALUE_UNINSTALL_CODE[] = L"UninstallCode";
 const wchar_t VALUE_PORTAL_URL[] = L"PortalUrl";
+const wchar_t VALUE_UNLOCK_INSTRUCTIONS[] = L"UnlockInstructions";
+const wchar_t VALUE_SUPPORT_CONTACT[] = L"SupportContact";
 const wchar_t VALUE_ACCOUNT_NUMBER[] = L"AccountNumber";
 const wchar_t VALUE_LAST_ERROR[] = L"LastError";
 
@@ -164,6 +166,22 @@ std::string DeviceConfig::portalUrl() {
 
 void DeviceConfig::setPortalUrl(const std::string& url) {
     writeString(VALUE_PORTAL_URL, url);
+}
+
+std::string DeviceConfig::unlockInstructions() {
+    return readString(VALUE_UNLOCK_INSTRUCTIONS);
+}
+
+void DeviceConfig::setUnlockInstructions(const std::string& instructions) {
+    writeString(VALUE_UNLOCK_INSTRUCTIONS, instructions);
+}
+
+std::string DeviceConfig::supportContact() {
+    return readString(VALUE_SUPPORT_CONTACT);
+}
+
+void DeviceConfig::setSupportContact(const std::string& contact) {
+    writeString(VALUE_SUPPORT_CONTACT, contact);
 }
 
 std::string DeviceConfig::accountNumber() {

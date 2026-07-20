@@ -68,6 +68,26 @@ void ZagaProvider::releaseCredential() {
     }
 }
 
+void ZagaProvider::refreshLockState() {
+    bool locked = LockGate::describe().locked;
+
+    // Idempotent: leave an existing locked tile in place so a re-enumeration that does
+    // not change the state never wipes a half-typed code. Only build or tear down when
+    // the state actually flips (or the tile is somehow missing while locked).
+    if (locked == _locked && (!locked || _credential != nullptr)) {
+        return;
+    }
+
+    _locked = locked;
+    releaseCredential();
+    if (_locked) {
+        _credential = new (std::nothrow) ZagaCredential();
+        if (_credential != nullptr) {
+            _credential->Initialize(_cpus, this);
+        }
+    }
+}
+
 IFACEMETHODIMP ZagaProvider::QueryInterface(REFIID riid, void** ppv) {
     if (ppv == nullptr) {
         return E_POINTER;
@@ -107,16 +127,7 @@ IFACEMETHODIMP ZagaProvider::SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO
     }
 
     _cpus = cpus;
-    _locked = LockGate::describe().locked;
-
-    releaseCredential();
-    if (_locked) {
-        _credential = new (std::nothrow) ZagaCredential();
-        if (_credential == nullptr) {
-            return E_OUTOFMEMORY;
-        }
-        _credential->Initialize(_cpus, this);
-    }
+    refreshLockState();
 
     return S_OK;
 }
@@ -175,6 +186,11 @@ IFACEMETHODIMP ZagaProvider::GetCredentialCount(
     if (count == nullptr || defaultIndex == nullptr || autoLogonWithDefault == nullptr) {
         return E_POINTER;
     }
+
+    // Re-decide on every enumeration. LogonUI re-queries this after a code is accepted
+    // (via CredentialsChanged); recomputing here is what lets the unlock tile disappear
+    // and the password tile return without a reboot.
+    refreshLockState();
 
     if (_locked && _credential != nullptr) {
         *count = 1;

@@ -67,10 +67,15 @@ private:
     ZagaProvider* _provider;
     ICredentialProviderCredentialEvents* _events;
 
+    // The running "entered N of 20" line shown as the user types, and the standing
+    // prompt it returns to when the box is empty.
+    std::wstring codeProgressMessage() const;
+
     GateInfo _info;
     std::wstring _account;
     std::wstring _status;
-    std::wstring _meta;
+    std::wstring _purchase;
+    std::wstring _support;
     std::wstring _code;
     std::wstring _message;
 };

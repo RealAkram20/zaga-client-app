@@ -5,6 +5,7 @@
 
 #include <initguid.h>
 #include "Guid.h"
+#include "Module.h"
 #include "ZagaProvider.h"
 
 using namespace zaga;
@@ -183,4 +184,12 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(module);
     }
     return TRUE;
+}
+
+namespace zaga {
+
+HINSTANCE dllInstance() {
+    return g_instance;
+}
+
 }

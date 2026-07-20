@@ -19,11 +19,13 @@ add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00 WIN32_LEAN_AND_MEAN NO
 
 add_library(zaga_core STATIC
     src/core/Base32.cpp
+    src/core/EnrollCodec.cpp
     src/core/Sha256Hmac.cpp
     src/core/TokenCodec.cpp
     src/core/Verifier.cpp
     src/store/DataProtection.cpp
     src/store/LocalStore.cpp
+    src/store/ProvisioningBundle.cpp
     src/config/DeviceConfig.cpp
     src/gate/LockGate.cpp
     src/net/Json.cpp
@@ -48,6 +50,7 @@ add_library(zaga_lock_provider SHARED
     src/provider/Dll.cpp
     src/provider/ZagaProvider.cpp
     src/provider/ZagaCredential.cpp
+    src/provider/Provider.rc
 )
 target_include_directories(zaga_lock_provider PUBLIC src/provider)
 target_link_libraries(zaga_lock_provider PRIVATE
@@ -69,6 +72,14 @@ add_executable(json_tests tests/json_tests.cpp)
 target_link_libraries(json_tests PRIVATE zaga_core)
 add_test(NAME json_tests COMMAND json_tests)
 
+add_executable(bundle_tests tests/bundle_tests.cpp)
+target_link_libraries(bundle_tests PRIVATE zaga_core)
+add_test(NAME bundle_tests COMMAND bundle_tests)
+
+add_executable(enroll_codec_tests tests/enroll_codec_tests.cpp)
+target_link_libraries(enroll_codec_tests PRIVATE zaga_core)
+add_test(NAME enroll_codec_tests COMMAND enroll_codec_tests)
+
 add_executable(hardware_tests tests/hardware_tests.cpp)
 target_link_libraries(hardware_tests PRIVATE zaga_core)
 add_test(NAME hardware_tests COMMAND hardware_tests)
@@ -76,6 +87,10 @@ add_test(NAME hardware_tests COMMAND hardware_tests)
 # Manual connectivity harness; needs a live portal, so it is not a ctest.
 add_executable(net_host tests/net_host.cpp)
 target_link_libraries(net_host PRIVATE zaga_core)
+
+# Manual offline end-to-end proof; needs a real bundle + token, so it is not a ctest.
+add_executable(offline_e2e tests/offline_e2e.cpp)
+target_link_libraries(offline_e2e PRIVATE zaga_core)
 
 # Desktop management app: the GUI window the user opens to see device status and
 # run the privileged actions (which it delegates to zaga_installer with a UAC

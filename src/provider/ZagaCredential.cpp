@@ -2,6 +2,9 @@
 
 #include <shlwapi.h>
 
+#include "DeviceConfig.h"
+#include "Module.h"
+#include "Resource.h"
 #include "ZagaProvider.h"
 
 #pragma comment(lib, "shlwapi.lib")
@@ -83,7 +86,8 @@ void ZagaCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, ZagaPro
     _provider = provider;
     _info = LockGate::describe();
 
-    _account = _info.provisioned ? widen(_info.accountNumber) : L"Not provisioned";
+    _account = _info.provisioned ? L"Account Number: " + widen(_info.accountNumber)
+                                 : L"Not enrolled";
 
     std::wstring status = widen(_info.statusText);
     if (!_info.deadlineText.empty()) {
@@ -92,18 +96,52 @@ void ZagaCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus, ZagaPro
     }
     _status = status;
 
-    std::wstring meta;
-    if (!_info.model.empty()) {
-        meta = widen(_info.model);
-    }
-    if (!_info.serial.empty()) {
-        if (!meta.empty()) {
-            meta += L" \x2022 ";
+    // The three lines a stranded customer needs, in the owner's words: whose account,
+    // that payment is due and where to pay, and who to call. Prefer the operator's
+    // configured wording; otherwise say it plainly with the portal the device knows.
+    std::string instructions = DeviceConfig::unlockInstructions();
+    if (!instructions.empty()) {
+        _purchase = widen(instructions);
+    } else {
+        std::string portal = DeviceConfig::portalUrl();
+        if (!portal.empty()) {
+            _purchase = L"Your payment is due. Please pay at " + widen(portal) +
+                        L" and quote your account number.";
+        } else {
+            _purchase = L"Your payment is due. Please contact your vendor to make "
+                        L"a payment.";
         }
-        meta += widen(_info.serial);
     }
-    _meta = meta;
-    _message = L"Enter your 20-character unlock code.";
+
+    std::string support = DeviceConfig::supportContact();
+    _support = L"Contact support on: " +
+               (support.empty() ? std::wstring(L"+256 704245408") : widen(support));
+
+    _message = codeProgressMessage();
+}
+
+// The unlock token is 20 base32 symbols, shown grouped as XXXXX-XXXXX-XXXXX-XXXXX.
+// Counting the symbols the customer has actually typed — dashes and spaces ignored,
+// since the framework and the verifier both discard them — lets them catch a dropped
+// character before they submit.
+std::wstring ZagaCredential::codeProgressMessage() const {
+    int typed = 0;
+    for (wchar_t c : _code) {
+        if (c != L'-' && c != L' ' && c != L'\t') {
+            ++typed;
+        }
+    }
+
+    if (typed == 0) {
+        return L"Enter your 20-character unlock code.";
+    }
+    if (typed < 20) {
+        return std::to_wstring(typed) + L" of 20 characters entered.";
+    }
+    if (typed == 20) {
+        return L"20 of 20 — press Unlock.";
+    }
+    return std::to_wstring(typed) + L" characters — that is longer than a 20-character code.";
 }
 
 IFACEMETHODIMP ZagaCredential::QueryInterface(REFIID riid, void** ppv) {
@@ -162,6 +200,8 @@ IFACEMETHODIMP ZagaCredential::SetDeselected() {
     if (_events != nullptr) {
         _events->SetFieldString(this, FIELD_CODE, L"");
     }
+    // Back to the standing prompt, so a re-selected tile never shows a stale count.
+    setMessage(codeProgressMessage());
     return S_OK;
 }
 
@@ -187,7 +227,8 @@ IFACEMETHODIMP ZagaCredential::GetStringValue(DWORD field, LPWSTR* value) {
     switch (field) {
         case FIELD_ACCOUNT: source = _account.c_str(); break;
         case FIELD_STATUS: source = _status.c_str(); break;
-        case FIELD_META: source = _meta.c_str(); break;
+        case FIELD_PURCHASE: source = _purchase.c_str(); break;
+        case FIELD_SUPPORT: source = _support.c_str(); break;
         case FIELD_CODE: source = _code.c_str(); break;
         case FIELD_MESSAGE: source = _message.c_str(); break;
         default: return E_INVALIDARG;
@@ -204,7 +245,18 @@ IFACEMETHODIMP ZagaCredential::GetBitmapValue(DWORD field, HBITMAP* bitmap) {
         return E_INVALIDARG;
     }
 
-    HBITMAP tile = makeTileBitmap();
+    // Load the bundled logo. Without LR_SHARED, LoadImage returns a handle the caller
+    // owns; LogonUI takes ownership of the returned HBITMAP and frees it, so each call
+    // hands back its own.
+    HBITMAP tile = static_cast<HBITMAP>(LoadImageW(
+        dllInstance(), MAKEINTRESOURCEW(IDB_TILE), IMAGE_BITMAP, 0, 0,
+        LR_DEFAULTCOLOR));
+
+    // Never leave the tile blank: if the resource is somehow missing, fall back to the
+    // solid brand square rather than failing the whole tile.
+    if (tile == nullptr) {
+        tile = makeTileBitmap();
+    }
     if (tile == nullptr) {
         return E_FAIL;
     }
@@ -243,6 +295,10 @@ IFACEMETHODIMP ZagaCredential::SetStringValue(DWORD field, LPCWSTR value) {
     }
 
     _code = value != nullptr ? value : L"";
+
+    // The framework calls this on every keystroke, so the count updates live and the
+    // customer can see a dropped character before submitting.
+    setMessage(codeProgressMessage());
     return S_OK;
 }
 
@@ -254,19 +310,9 @@ IFACEMETHODIMP ZagaCredential::SetComboBoxSelectedValue(DWORD, DWORD) {
     return E_NOTIMPL;
 }
 
-IFACEMETHODIMP ZagaCredential::CommandLinkClicked(DWORD field) {
-    if (field == FIELD_HELP_LINK) {
-        setMessage(L"On another device, open your unlock portal and enter this "
-                   L"account number to pay and receive a code.");
-        return S_OK;
-    }
-
-    if (field == FIELD_TECH_LINK) {
-        setMessage(L"Technician removal requires the uninstall authorization code "
-                   L"recorded in the portal.");
-        return S_OK;
-    }
-
+IFACEMETHODIMP ZagaCredential::CommandLinkClicked(DWORD) {
+    // The tile carries no command links: the purchase and support lines say
+    // everything a customer can act on, and fewer words read better on a lock screen.
     return E_INVALIDARG;
 }
 
@@ -281,17 +327,21 @@ IFACEMETHODIMP ZagaCredential::GetSerialization(
     VerifyResult result = LockGate::applyCode(narrow(_code), message);
     setMessage(widen(message));
 
-    // The provider never completes a Windows logon itself. It only lifts the gate;
-    // once unlocked, a re-enumeration lets the normal logon providers through.
-    *response = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
     SHStrDupW(widen(message).c_str(), optionalStatusText);
 
+    // The provider never completes a Windows logon itself. It only lifts the gate.
+    // On acceptance, FINISHED tells LogonUI this tile's work is over, and the
+    // re-enumeration then returns zero Zaga tiles — so the lock screen gives way to
+    // the normal sign-in on its own, with nothing further to click. On failure,
+    // NOT_FINISHED keeps the tile up so the customer can retype.
     if (result == VerifyResult::Accepted) {
+        *response = CPGSR_NO_CREDENTIAL_FINISHED;
         *optionalStatusIcon = CPSI_SUCCESS;
         if (_provider != nullptr) {
             _provider->SignalReenumerate();
         }
     } else {
+        *response = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
         *optionalStatusIcon = CPSI_ERROR;
     }
 

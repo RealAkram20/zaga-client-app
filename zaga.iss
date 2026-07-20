@@ -118,9 +118,9 @@ begin
     Prompt.Height := ScaleY(34);
     Prompt.AutoSize := False;
     Prompt.WordWrap := True;
-    Prompt.Caption := 'Removal of this device is protected.' + #13#10 +
-                      'Contact support for the uninstall code. It is released once your' + #13#10 +
-                      'payment plan is complete.';
+    Prompt.Caption := 'You cannot uninstall Zaga Device Lock until your payment plan' + #13#10 +
+                      'is fully completed. Once paid in full, contact Support to receive' + #13#10 +
+                      'your uninstall code, then enter it below.';
 
     Edit := TNewEdit.Create(Form);
     Edit.Parent := Form;

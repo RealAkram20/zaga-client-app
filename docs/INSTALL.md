@@ -42,8 +42,10 @@ zaga_installer install
 ```
 
 This copies the DLL and the installer to `C:\Program Files\Zaga`, registers the
-provider (both as a provider and a filter), schedules an hourly SYSTEM check-in
-task (`Zaga Device Heartbeat`), and leaves the lock disabled. Manage the task by
+provider (both as a provider and a filter), schedules a SYSTEM check-in task that
+runs every 5 minutes (`Zaga Device Heartbeat`), and leaves the lock disabled. That
+task is also the safety net that locks an already-open session once it goes overdue;
+enrolling and applying a code enforce instantly on their own. Manage the task by
 hand with `zaga_installer schedule` / `unschedule`.
 
 ## 2. Provision the device

@@ -54,6 +54,12 @@ private:
 
     void releaseCredential();
 
+    // Re-reads the live lock state and makes _credential match it. Called at every
+    // enumeration, not just the first, so that when a code is accepted mid-screen the
+    // now-stale unlock tile is dropped and the normal logon providers take over
+    // without a reboot.
+    void refreshLockState();
+
     LONG _cRef;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO _cpus;
     ICredentialProviderEvents* _events;

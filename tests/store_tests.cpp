@@ -37,6 +37,7 @@ StoredDevice sampleDevice() {
     device.state.lockDeadlineDay = 20123;
     device.state.status = DeviceStatus::Active;
     device.state.lastTokenWasGrace = true;
+    device.state.graceDays = 5;
     return device;
 }
 
@@ -53,7 +54,8 @@ bool sameDevice(const StoredDevice& a, const StoredDevice& b) {
         && a.state.lastCounter == b.state.lastCounter
         && a.state.lockDeadlineDay == b.state.lockDeadlineDay
         && a.state.status == b.state.status
-        && a.state.lastTokenWasGrace == b.state.lastTokenWasGrace;
+        && a.state.lastTokenWasGrace == b.state.lastTokenWasGrace
+        && a.state.graceDays == b.state.graceDays;
 }
 
 std::wstring tempPath() {
@@ -85,6 +87,20 @@ void testDeserializeRejectsGarbage() {
     std::vector<uint8_t> truncated = LocalStore::serialize(sampleDevice());
     truncated.resize(truncated.size() / 2);
     check(!LocalStore::deserialize(truncated, out), "truncated buffer rejected");
+}
+
+// A v2 store is a v3 store minus the trailing graceDays byte. A device upgraded
+// in the field must keep its state, reading the missing field as zero grace.
+void testVersionTwoStoreStillLoads() {
+    std::printf("v2 store still loads\n");
+    std::vector<uint8_t> bytes = LocalStore::serialize(sampleDevice());
+    bytes[4] = 2;               // MAGIC is 4 bytes; the version byte follows.
+    bytes.pop_back();           // graceDays is the last field.
+
+    StoredDevice restored;
+    check(LocalStore::deserialize(bytes, restored), "v2 deserialize succeeds");
+    check(restored.state.graceDays == 0, "missing grace field reads as zero");
+    check(restored.accountNumber == "ZG-40000", "fields before it are intact");
 }
 
 void testDpapiRoundTrip() {
@@ -130,6 +146,7 @@ void testSaveLoad() {
 int main() {
     testSerializeRoundTrip();
     testDeserializeRejectsGarbage();
+    testVersionTwoStoreStillLoads();
     testDpapiRoundTrip();
     testSaveLoad();
 

@@ -21,6 +21,18 @@ std::wstring widen(const std::string& text) {
     return wide;
 }
 
+std::string narrow(const std::wstring& text) {
+    if (text.empty()) {
+        return std::string();
+    }
+    int length = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string narrowed(length > 0 ? length - 1 : 0, '\0');
+    if (length > 0) {
+        WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &narrowed[0], length, nullptr, nullptr);
+    }
+    return narrowed;
+}
+
 class Handle {
 public:
     explicit Handle(HINTERNET handle) : _handle(handle) {}
@@ -39,11 +51,33 @@ private:
     HINTERNET _handle;
 };
 
+// Turns a WinHTTP failure into something worth reading. The codes that matter here
+// are the ones a bad address or an unplugged network actually produce; anything else
+// falls back to the number, which is still better than silence.
+std::string describe(DWORD code, const std::string& host) {
+    switch (code) {
+        case ERROR_WINHTTP_NAME_NOT_RESOLVED:
+            return "No computer called \"" + host + "\" could be found on the network.";
+        case ERROR_WINHTTP_CANNOT_CONNECT:
+            return "Nothing answered at " + host + ". Check the portal is running and "
+                   "that this machine can reach it.";
+        case ERROR_WINHTTP_TIMEOUT:
+            return "Timed out waiting for " + host + ".";
+        case ERROR_WINHTTP_CONNECTION_ERROR:
+            return "The connection to " + host + " was lost.";
+        case ERROR_WINHTTP_SECURE_FAILURE:
+            return "The HTTPS certificate for " + host + " could not be trusted.";
+        default:
+            return "Could not reach " + host + " (network error " +
+                   std::to_string(code) + ").";
+    }
+}
+
 HttpResponse send(const std::wstring& method,
                   const std::string& url,
                   const std::string& body,
                   const std::string& bearer) {
-    HttpResponse response{false, 0, ""};
+    HttpResponse response{false, 0, "", ""};
 
     std::wstring wideUrl = widen(url);
     URL_COMPONENTS parts{};
@@ -59,8 +93,12 @@ HttpResponse send(const std::wstring& method,
     parts.dwExtraInfoLength = ARRAYSIZE(extra);
 
     if (!WinHttpCrackUrl(wideUrl.c_str(), 0, 0, &parts)) {
+        response.error = "\"" + url + "\" is not a usable portal address. It should look "
+                         "like http://192.168.1.20/zagatech.";
         return response;
     }
+
+    std::string hostText = narrow(host);
 
     bool secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
     std::wstring fullPath = std::wstring(path) + extra;
@@ -69,11 +107,13 @@ HttpResponse send(const std::wstring& method,
                                WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                                WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session) {
+        response.error = describe(GetLastError(), hostText);
         return response;
     }
 
     Handle connection(WinHttpConnect(session.get(), host, parts.nPort, 0));
     if (!connection) {
+        response.error = describe(GetLastError(), hostText);
         return response;
     }
 
@@ -81,6 +121,7 @@ HttpResponse send(const std::wstring& method,
                                       nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                       secure ? WINHTTP_FLAG_SECURE : 0));
     if (!request) {
+        response.error = describe(GetLastError(), hostText);
         return response;
     }
 
@@ -96,6 +137,7 @@ HttpResponse send(const std::wstring& method,
         body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data()),
         static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0);
     if (!sent || !WinHttpReceiveResponse(request.get(), nullptr)) {
+        response.error = describe(GetLastError(), hostText);
         return response;
     }
 

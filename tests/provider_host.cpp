@@ -103,9 +103,32 @@ int main() {
         filter->Release();
     }
 
+    DWORD fieldCount = 0;
+    hr = provider->GetFieldDescriptorCount(&fieldCount);
+    check(SUCCEEDED(hr) && fieldCount == FIELD_COUNT, "field descriptor count matches");
+
     ICredentialProviderCredential* credential = nullptr;
     hr = provider->GetCredentialAt(0, &credential);
     check(SUCCEEDED(hr) && credential != nullptr, "credential retrieved");
+
+    // The buy-a-code and support lines must be present and non-empty, so a stranded
+    // customer is told where to pay and who to call rather than left staring at a
+    // bare box.
+    LPWSTR purchase = nullptr;
+    hr = credential->GetStringValue(FIELD_PURCHASE, &purchase);
+    check(SUCCEEDED(hr) && purchase != nullptr && purchase[0] != L'\0',
+          "purchase instructions are shown on the tile");
+    if (purchase != nullptr) {
+        CoTaskMemFree(purchase);
+    }
+
+    LPWSTR support = nullptr;
+    hr = credential->GetStringValue(FIELD_SUPPORT, &support);
+    check(SUCCEEDED(hr) && support != nullptr && support[0] != L'\0',
+          "support contact is shown on the tile");
+    if (support != nullptr) {
+        CoTaskMemFree(support);
+    }
 
     CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE response = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
     CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION serialization{};
@@ -123,6 +146,10 @@ int main() {
     credential->SetStringValue(FIELD_CODE, VALID_CODE);
     hr = credential->GetSerialization(&response, &serialization, &statusText, &statusIcon);
     check(SUCCEEDED(hr) && statusIcon == CPSI_SUCCESS, "valid code accepted");
+    // FINISHED is what lets LogonUI drop the lock screen on its own; NOT_FINISHED
+    // here is the field bug where the customer had to wait and prod the screen.
+    check(response == CPGSR_NO_CREDENTIAL_FINISHED,
+          "acceptance tells LogonUI to dismiss the tile");
     if (statusText != nullptr) {
         CoTaskMemFree(statusText);
     }
@@ -131,6 +158,16 @@ int main() {
     bool reloaded = LocalStore::load(storePath, after);
     check(reloaded && after.state.lastCounter == 1, "counter persisted through the COM layer");
     check(reloaded && after.state.lockDeadlineDay > 0, "lock deadline extended on unlock");
+
+    // The regression that made the field device need a reboot: once the code is
+    // accepted the store is unlocked, so a re-enumeration (what LogonUI does after
+    // CredentialsChanged) must now offer zero tiles, letting the password provider
+    // take over. Before the fix this still returned 1 and stranded the user.
+    DWORD afterCount = 99;
+    DWORD afterDefault = 0;
+    BOOL afterAuto = TRUE;
+    hr = provider->GetCredentialCount(&afterCount, &afterDefault, &afterAuto);
+    check(SUCCEEDED(hr) && afterCount == 0, "unlock tile is gone after acceptance (no reboot needed)");
 
     credential->SetStringValue(FIELD_CODE, VALID_CODE);
     hr = credential->GetSerialization(&response, &serialization, &statusText, &statusIcon);
